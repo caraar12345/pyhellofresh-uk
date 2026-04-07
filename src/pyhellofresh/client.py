@@ -20,13 +20,15 @@ _LOCALE = "en-GB"
 _TOKEN_EXPIRY_BUFFER = timedelta(seconds=60)
 _PDF_URL_TEMPLATE = f"{_BASE_URL}/recipecards/card/{{recipe_id}}-en-GB.pdf"
 
-# Headers required to pass Cloudflare bot protection
-_BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/146.0.0.0 Safari/537.36"
-    ),
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/146.0.0.0 Safari/537.36"
+)
+
+# Headers for XHR/fetch requests (same-origin, CORS)
+_FETCH_HEADERS = {
+    "User-Agent": _USER_AGENT,
     "Accept-Language": "en-GB,en;q=0.9",
     "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
     "sec-ch-ua-mobile": "?0",
@@ -37,53 +39,94 @@ _BROWSER_HEADERS = {
     "Sec-Fetch-Dest": "empty",
 }
 
+# Headers for the initial page navigation (what a browser sends for a top-level GET)
+_NAV_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+    "Upgrade-Insecure-Requests": "1",
+}
+
 
 class HelloFreshClient:
     """Async client for the HelloFresh UK API.
+
+    The client manages its own aiohttp session with a persistent cookie jar so
+    that Cloudflare session cookies are retained across requests.
 
     Usage::
 
         async with HelloFreshClient(email, password) as client:
             info = await client.get_customer_info()
             delivery = await client.get_current_week_meals(info.active_subscription_id)
+
+    Or without the context manager (e.g. long-lived use in HA)::
+
+        client = HelloFreshClient(email, password)
+        # ... use client ...
+        await client.close()
     """
 
-    def __init__(
-        self,
-        email: str,
-        password: str,
-        session: aiohttp.ClientSession | None = None,
-    ) -> None:
+    def __init__(self, email: str, password: str) -> None:
         self._email = email
         self._password = password
-        self._session = session
-        self._owns_session = session is None
+        self._session: aiohttp.ClientSession | None = None
         self._token: AuthToken | None = None
 
+    def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                cookie_jar=aiohttp.CookieJar(),
+            )
+        return self._session
+
+    async def close(self) -> None:
+        """Close the underlying HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     async def __aenter__(self) -> HelloFreshClient:
-        if self._owns_session:
-            self._session = aiohttp.ClientSession()
         return self
 
     async def __aexit__(self, *args: object) -> None:
-        if self._owns_session and self._session:
-            await self._session.close()
-            self._session = None
+        await self.close()
 
     # ------------------------------------------------------------------
     # Authentication
     # ------------------------------------------------------------------
 
+    async def _acquire_cf_cookies(self) -> None:
+        """Visit the login page as a browser navigation to obtain CF cookies."""
+        session = self._ensure_session()
+        try:
+            async with session.get(
+                f"{_BASE_URL}/login",
+                headers=_NAV_HEADERS,
+                allow_redirects=True,
+            ) as resp:
+                _LOGGER.debug("CF pre-visit status: %s", resp.status)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("CF pre-visit failed (continuing): %s", err)
+
     async def authenticate(self) -> AuthToken:
         """Authenticate with email and password, returning a fresh token."""
-        assert self._session is not None
+        await self._acquire_cf_cookies()
+
+        session = self._ensure_session()
         payload = {"username": self._email, "password": self._password}
-        async with self._session.post(
+        async with session.post(
             f"{_BASE_URL}/gw/login",
             params={"country": _COUNTRY, "locale": _LOCALE},
             json=payload,
             headers={
-                **_BROWSER_HEADERS,
+                **_FETCH_HEADERS,
                 "Accept": "application/json, text/plain, */*",
                 "Referer": f"{_BASE_URL}/login",
             },
@@ -109,8 +152,8 @@ class HelloFreshClient:
 
     async def _refresh_token(self, refresh_token: str) -> AuthToken:
         """Obtain a new access token using the stored refresh token."""
-        assert self._session is not None
-        async with self._session.post(
+        session = self._ensure_session()
+        async with session.post(
             f"{_AUTH0_URL}/oauth/token",
             data={
                 "grant_type": "refresh_token",
@@ -164,14 +207,14 @@ class HelloFreshClient:
 
     async def _get(self, path: str, **params: str | int) -> dict:
         """Perform an authenticated GET request."""
-        assert self._session is not None
+        session = self._ensure_session()
         access_token = await self._ensure_token()
         query = {"country": _COUNTRY, "locale": _LOCALE, **params}
-        async with self._session.get(
+        async with session.get(
             f"{_BASE_URL}{path}",
             params=query,
             headers={
-                **_BROWSER_HEADERS,
+                **_FETCH_HEADERS,
                 "Accept": "*/*",
                 "Authorization": f"Bearer {access_token}",
             },

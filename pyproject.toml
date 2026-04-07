@@ -1,6 +1,6 @@
 [project]
 name = "pyhellofresh-uk"
-version = "0.1.2"
+version = "0.1.3"
 description = "Async Python library for the HelloFresh UK API"
 readme = "README.md"
 license = { text = "MIT" }

@@ -9,6 +9,10 @@ class AuthenticationError(HelloFreshError):
     """Raised when authentication fails."""
 
 
+class CloudflareBlockError(HelloFreshError):
+    """Raised when Cloudflare blocks the request (403)."""
+
+
 class ApiError(HelloFreshError):
     """Raised when an API call fails."""
 

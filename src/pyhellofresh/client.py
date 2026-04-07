@@ -6,8 +6,9 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
+from yarl import URL
 
-from .exceptions import ApiError, AuthenticationError
+from .exceptions import ApiError, AuthenticationError, CloudflareBlockError
 from .models import AuthToken, CustomerInfo, Meal, WeeklyDelivery
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ _USER_AGENT = (
     "Chrome/146.0.0.0 Safari/537.36"
 )
 
-# Headers for XHR/fetch requests (same-origin, CORS)
+# Headers for XHR/fetch requests (same-origin CORS)
 _FETCH_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept-Language": "en-GB,en;q=0.9",
@@ -39,7 +40,7 @@ _FETCH_HEADERS = {
     "Sec-Fetch-Dest": "empty",
 }
 
-# Headers for the initial page navigation (what a browser sends for a top-level GET)
+# Headers for a top-level browser page navigation
 _NAV_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -57,33 +58,35 @@ _NAV_HEADERS = {
 class HelloFreshClient:
     """Async client for the HelloFresh UK API.
 
-    The client manages its own aiohttp session with a persistent cookie jar so
-    that Cloudflare session cookies are retained across requests.
+    The client owns its aiohttp session with a persistent cookie jar.
+
+    When ``flaresolverr_url`` is provided, it is used *only* for the initial
+    cookie pre-visit (to solve Cloudflare challenges). All subsequent requests
+    — including the login POST and all API calls — go directly to HelloFresh.
 
     Usage::
 
         async with HelloFreshClient(email, password) as client:
             info = await client.get_customer_info()
             delivery = await client.get_current_week_meals(info.active_subscription_id)
-
-    Or without the context manager (e.g. long-lived use in HA)::
-
-        client = HelloFreshClient(email, password)
-        # ... use client ...
-        await client.close()
     """
 
-    def __init__(self, email: str, password: str) -> None:
+    def __init__(
+        self,
+        email: str,
+        password: str,
+        *,
+        flaresolverr_url: str | None = None,
+    ) -> None:
         self._email = email
         self._password = password
+        self._flaresolverr_url = flaresolverr_url.rstrip("/") if flaresolverr_url else None
         self._session: aiohttp.ClientSession | None = None
         self._token: AuthToken | None = None
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                cookie_jar=aiohttp.CookieJar(),
-            )
+            self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar())
         return self._session
 
     async def close(self) -> None:
@@ -99,12 +102,21 @@ class HelloFreshClient:
         await self.close()
 
     # ------------------------------------------------------------------
-    # Authentication
+    # Cloudflare cookie acquisition
     # ------------------------------------------------------------------
 
-    async def _acquire_cf_cookies(self) -> None:
-        """Visit the login page as a browser navigation to obtain CF cookies."""
+    async def _acquire_cf_cookies(self) -> str:
+        """Visit the login page to obtain Cloudflare session cookies.
+
+        Returns the User-Agent string that should be used for subsequent
+        requests (important when FlareSolverr provides its own UA).
+        """
         session = self._ensure_session()
+
+        if self._flaresolverr_url:
+            return await self._acquire_cf_cookies_via_flaresolverr(session)
+
+        # Direct visit — may not always work against CF but worth trying
         try:
             async with session.get(
                 f"{_BASE_URL}/login",
@@ -115,24 +127,65 @@ class HelloFreshClient:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("CF pre-visit failed (continuing): %s", err)
 
+        return _USER_AGENT
+
+    async def _acquire_cf_cookies_via_flaresolverr(
+        self, session: aiohttp.ClientSession
+    ) -> str:
+        """Use FlareSolverr to solve CF challenge and import resulting cookies."""
+        assert self._flaresolverr_url is not None
+        _LOGGER.debug("Acquiring CF cookies via FlareSolverr")
+
+        async with session.post(
+            f"{self._flaresolverr_url}/v1",
+            json={
+                "cmd": "request.get",
+                "url": f"{_BASE_URL}/login",
+                "maxTimeout": 60000,
+            },
+        ) as resp:
+            fls = await resp.json()
+
+        if fls.get("status") != "ok":
+            raise ApiError(0, f"FlareSolverr: {fls.get('message', 'unknown error')}")
+
+        solution = fls["solution"]
+
+        # Import CF cookies into our own session jar so direct requests carry them
+        cookies = {c["name"]: c["value"] for c in solution.get("cookies", [])}
+        if cookies:
+            session.cookie_jar.update_cookies(cookies, URL(f"{_BASE_URL}/"))
+            _LOGGER.debug("Imported %d CF cookies from FlareSolverr", len(cookies))
+
+        return solution.get("userAgent", _USER_AGENT)
+
+    # ------------------------------------------------------------------
+    # Authentication
+    # ------------------------------------------------------------------
+
     async def authenticate(self) -> AuthToken:
         """Authenticate with email and password, returning a fresh token."""
-        await self._acquire_cf_cookies()
+        user_agent = await self._acquire_cf_cookies()
 
         session = self._ensure_session()
-        payload = {"username": self._email, "password": self._password}
         async with session.post(
             f"{_BASE_URL}/gw/login",
             params={"country": _COUNTRY, "locale": _LOCALE},
-            json=payload,
+            json={"username": self._email, "password": self._password},
             headers={
                 **_FETCH_HEADERS,
+                "User-Agent": user_agent,
                 "Accept": "application/json, text/plain, */*",
                 "Referer": f"{_BASE_URL}/login",
             },
         ) as resp:
             if resp.status == 401:
                 raise AuthenticationError("Invalid email or password")
+            if resp.status == 403:
+                raise CloudflareBlockError(
+                    "Cloudflare blocked the login request. "
+                    "Provide a FlareSolverr URL to bypass this."
+                )
             if resp.status != 200:
                 text = await resp.text()
                 raise ApiError(resp.status, text)
@@ -202,17 +255,16 @@ class HelloFreshClient:
         self._token = token
 
     # ------------------------------------------------------------------
-    # API calls
+    # API calls (always direct)
     # ------------------------------------------------------------------
 
     async def _get(self, path: str, **params: str | int) -> dict:
         """Perform an authenticated GET request."""
         session = self._ensure_session()
         access_token = await self._ensure_token()
-        query = {"country": _COUNTRY, "locale": _LOCALE, **params}
         async with session.get(
             f"{_BASE_URL}{path}",
-            params=query,
+            params={"country": _COUNTRY, "locale": _LOCALE, **params},
             headers={
                 **_FETCH_HEADERS,
                 "Accept": "*/*",

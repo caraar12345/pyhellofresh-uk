@@ -20,6 +20,23 @@ _LOCALE = "en-GB"
 _TOKEN_EXPIRY_BUFFER = timedelta(seconds=60)
 _PDF_URL_TEMPLATE = f"{_BASE_URL}/recipecards/card/{{recipe_id}}-en-GB.pdf"
 
+# Headers required to pass Cloudflare bot protection
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/146.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-GB,en;q=0.9",
+    "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Origin": _BASE_URL,
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+}
+
 
 class HelloFreshClient:
     """Async client for the HelloFresh UK API.
@@ -65,6 +82,11 @@ class HelloFreshClient:
             f"{_BASE_URL}/gw/login",
             params={"country": _COUNTRY, "locale": _LOCALE},
             json=payload,
+            headers={
+                **_BROWSER_HEADERS,
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"{_BASE_URL}/login",
+            },
         ) as resp:
             if resp.status == 401:
                 raise AuthenticationError("Invalid email or password")
@@ -148,7 +170,11 @@ class HelloFreshClient:
         async with self._session.get(
             f"{_BASE_URL}{path}",
             params=query,
-            headers={"Authorization": f"Bearer {access_token}"},
+            headers={
+                **_BROWSER_HEADERS,
+                "Accept": "*/*",
+                "Authorization": f"Bearer {access_token}",
+            },
         ) as resp:
             if resp.status == 401:
                 raise AuthenticationError("Access token rejected by API")

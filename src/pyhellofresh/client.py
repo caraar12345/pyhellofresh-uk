@@ -9,7 +9,7 @@ import aiohttp
 from yarl import URL
 
 from .exceptions import ApiError, AuthenticationError, CloudflareBlockError
-from .models import AuthToken, CustomerInfo, Meal, WeeklyDelivery
+from .models import AuthToken, CustomerInfo, Meal, UpcomingDelivery, WeeklyDelivery
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +27,6 @@ _USER_AGENT = (
     "Chrome/146.0.0.0 Safari/537.36"
 )
 
-# Headers for XHR/fetch requests (same-origin CORS)
 _FETCH_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept-Language": "en-GB,en;q=0.9",
@@ -40,7 +39,6 @@ _FETCH_HEADERS = {
     "Sec-Fetch-Dest": "empty",
 }
 
-# Headers for a top-level browser page navigation
 _NAV_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -61,14 +59,7 @@ class HelloFreshClient:
     The client owns its aiohttp session with a persistent cookie jar.
 
     When ``flaresolverr_url`` is provided, it is used *only* for the initial
-    cookie pre-visit (to solve Cloudflare challenges). All subsequent requests
-    — including the login POST and all API calls — go directly to HelloFresh.
-
-    Usage::
-
-        async with HelloFreshClient(email, password) as client:
-            info = await client.get_customer_info()
-            delivery = await client.get_current_week_meals(info.active_subscription_id)
+    cookie pre-visit. All subsequent requests go directly to HelloFresh.
     """
 
     def __init__(
@@ -106,17 +97,12 @@ class HelloFreshClient:
     # ------------------------------------------------------------------
 
     async def _acquire_cf_cookies(self) -> str:
-        """Visit the login page to obtain Cloudflare session cookies.
-
-        Returns the User-Agent string that should be used for subsequent
-        requests (important when FlareSolverr provides its own UA).
-        """
+        """Visit the login page to obtain CF cookies. Returns the User-Agent to use."""
         session = self._ensure_session()
 
         if self._flaresolverr_url:
             return await self._acquire_cf_cookies_via_flaresolverr(session)
 
-        # Direct visit — may not always work against CF but worth trying
         try:
             async with session.get(
                 f"{_BASE_URL}/login",
@@ -132,17 +118,12 @@ class HelloFreshClient:
     async def _acquire_cf_cookies_via_flaresolverr(
         self, session: aiohttp.ClientSession
     ) -> str:
-        """Use FlareSolverr to solve CF challenge and import resulting cookies."""
         assert self._flaresolverr_url is not None
         _LOGGER.debug("Acquiring CF cookies via FlareSolverr")
 
         async with session.post(
             f"{self._flaresolverr_url}/v1",
-            json={
-                "cmd": "request.get",
-                "url": f"{_BASE_URL}/login",
-                "maxTimeout": 60000,
-            },
+            json={"cmd": "request.get", "url": f"{_BASE_URL}/login", "maxTimeout": 60000},
         ) as resp:
             fls = await resp.json()
 
@@ -150,8 +131,6 @@ class HelloFreshClient:
             raise ApiError(0, f"FlareSolverr: {fls.get('message', 'unknown error')}")
 
         solution = fls["solution"]
-
-        # Import CF cookies into our own session jar so direct requests carry them
         cookies = {c["name"]: c["value"] for c in solution.get("cookies", [])}
         if cookies:
             session.cookie_jar.update_cookies(cookies, URL(f"{_BASE_URL}/"))
@@ -166,8 +145,8 @@ class HelloFreshClient:
     async def authenticate(self) -> AuthToken:
         """Authenticate with email and password, returning a fresh token."""
         user_agent = await self._acquire_cf_cookies()
-
         session = self._ensure_session()
+
         async with session.post(
             f"{_BASE_URL}/gw/login",
             params={"country": _COUNTRY, "locale": _LOCALE},
@@ -204,7 +183,6 @@ class HelloFreshClient:
         return token
 
     async def _refresh_token(self, refresh_token: str) -> AuthToken:
-        """Obtain a new access token using the stored refresh token."""
         session = self._ensure_session()
         async with session.post(
             f"{_AUTH0_URL}/oauth/token",
@@ -233,7 +211,6 @@ class HelloFreshClient:
         return token
 
     async def _ensure_token(self) -> str:
-        """Return a valid access token, refreshing or re-authenticating as needed."""
         if self._token is None:
             await self.authenticate()
             assert self._token is not None
@@ -255,18 +232,18 @@ class HelloFreshClient:
         self._token = token
 
     # ------------------------------------------------------------------
-    # API calls (always direct)
+    # Core request helper
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, **params: str | int) -> dict:
-        """Perform an authenticated GET request, with one CF-cookie retry."""
+    async def _request(self, path: str, params: dict) -> dict:
+        """Authenticated GET with one CF-cookie retry on HTML 403."""
         session = self._ensure_session()
         access_token = await self._ensure_token()
 
         for attempt in range(2):
             async with session.get(
                 f"{_BASE_URL}{path}",
-                params={"country": _COUNTRY, "locale": _LOCALE, **params},
+                params=params,
                 headers={
                     **_FETCH_HEADERS,
                     "Accept": "*/*",
@@ -285,9 +262,9 @@ class HelloFreshClient:
                         await self._acquire_cf_cookies()
                         continue
                     text = await resp.text()
-                    raise CloudflareBlockError(
-                        f"Cloudflare blocked the request to {path}"
-                    ) if "text/html" in content_type else ApiError(resp.status, text)
+                    if "text/html" in content_type:
+                        raise CloudflareBlockError(f"Cloudflare blocked request to {path}")
+                    raise ApiError(resp.status, text)
 
                 if resp.status != 200:
                     text = await resp.text()
@@ -297,9 +274,17 @@ class HelloFreshClient:
 
         raise CloudflareBlockError(f"Cloudflare block persisted after cookie refresh for {path}")
 
+    def _std_params(self, **extra: str | int) -> dict:
+        """Standard params (country + locale) merged with extras."""
+        return {"country": _COUNTRY, "locale": _LOCALE, **extra}
+
+    # ------------------------------------------------------------------
+    # API methods
+    # ------------------------------------------------------------------
+
     async def get_customer_info(self) -> CustomerInfo:
         """Return customer account information."""
-        data = await self._get("/gw/api/customers/me/info")
+        data = await self._request("/gw/api/customers/me/info", self._std_params())
         return CustomerInfo(
             id=data["id"],
             uuid=data["uuid"],
@@ -317,30 +302,21 @@ class HelloFreshClient:
         *,
         week: str | None = None,
     ) -> WeeklyDelivery:
-        """Return meals for the specified week (defaults to the current ISO week).
-
-        Args:
-            subscription_id: The customer's active subscription ID.
-            week: ISO week string like "2026-W15". Defaults to the current week.
-
-        Returns:
-            A WeeklyDelivery for the requested week, or an empty one if not found.
-        """
+        """Return meals for the specified week (defaults to the current ISO week)."""
         if week is None:
             iso = datetime.now().isocalendar()
             week = f"{iso.year}-W{iso.week:02d}"
 
-        data = await self._get(
+        data = await self._request(
             "/gw/my-deliveries/past-deliveries",
-            **{
+            self._std_params(**{
                 "from": week,
                 "rating-scale": "5",
                 "subscription": str(subscription_id),
-            },
+            }),
         )
 
-        weeks: list[dict] = data.get("weeks", [])
-        for entry in weeks:
+        for entry in data.get("weeks", []):
             if entry.get("week") == week:
                 return WeeklyDelivery(
                     week=week,
@@ -348,6 +324,83 @@ class HelloFreshClient:
                 )
 
         return WeeklyDelivery(week=week, meals=[])
+
+    async def get_upcoming_delivery(
+        self,
+        subscription_id: int,
+        customer_plan_id: str,
+    ) -> UpcomingDelivery | None:
+        """Return the next scheduled delivery with currently selected meals.
+
+        Returns None if no upcoming (non-delivered) delivery is found.
+        """
+        now = datetime.now()
+        iso = now.isocalendar()
+        range_start = f"{iso.year}-W{iso.week:02d}"
+        # Look 8 weeks ahead to cover skipped/holiday weeks
+        range_end_dt = now + timedelta(weeks=8)
+        range_end_iso = range_end_dt.isocalendar()
+        range_end = f"{range_end_iso.year}-W{range_end_iso.week:02d}"
+
+        data = await self._request(
+            "/gw/api/customers/me/deliveries",
+            self._std_params(rangeStart=range_start, rangeEnd=range_end),
+        )
+
+        next_item = _find_next_delivery(data.get("items", []))
+        if next_item is None:
+            return None
+
+        week = next_item["id"]
+        cutoff_date = datetime.fromisoformat(next_item["cutoffDate"])
+        delivery_date = datetime.fromisoformat(next_item["deliveryDate"])
+        status = next_item.get("status", "")
+        product = next_item.get("product", {})
+        delivery_option = next_item.get("deliveryOption", {})
+
+        menu_data = await self._request(
+            "/gw/my-deliveries/menu",
+            {
+                "customerPlanId": customer_plan_id,
+                "delivery-option": delivery_option.get("handle", ""),
+                "exclude": "",
+                "exclude-feedback": "true",
+                "include-filters": "true",
+                "include-future-feedback": "false",
+                "locale": _LOCALE,
+                "preference": "chefschoice",
+                "product-sku": product.get("handle", ""),
+                "servings": str(product.get("specs", {}).get("size", 2)),
+                "subscription": str(subscription_id),
+                "week": week,
+            },
+        )
+
+        selected = [
+            _parse_meal_from_menu(m)
+            for m in menu_data.get("meals", [])
+            if m.get("selection") and m["selection"].get("quantity", 0) > 0
+        ]
+
+        return UpcomingDelivery(
+            week=week,
+            cutoff_date=cutoff_date,
+            delivery_date=delivery_date,
+            status=status,
+            meals=selected,
+        )
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _find_next_delivery(items: list[dict]) -> dict | None:
+    """Return the earliest non-delivered delivery, or None."""
+    for item in items:
+        if item.get("status") != "DELIVERED":
+            return item
+    return None
 
 
 def _parse_meals(raw: list[dict]) -> list[Meal]:
@@ -366,3 +419,18 @@ def _parse_meals(raw: list[dict]) -> list[Meal]:
         for m in raw
         if "id" in m and "name" in m
     ]
+
+
+def _parse_meal_from_menu(item: dict) -> Meal:
+    r = item.get("recipe", {})
+    return Meal(
+        id=r["id"],
+        name=r["name"],
+        headline=r.get("headline", ""),
+        image_url=r.get("image", ""),
+        website_url=r.get("websiteURL", ""),
+        pdf_url=_PDF_URL_TEMPLATE.format(recipe_id=r["id"]),
+        prep_time=r.get("prepTime"),
+        total_time=r.get("totalTime"),
+        category=r.get("category"),
+    )

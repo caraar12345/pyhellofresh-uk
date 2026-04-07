@@ -2,7 +2,7 @@
 
 from .client import HelloFreshClient
 from .exceptions import ApiError, AuthenticationError, CloudflareBlockError, HelloFreshError
-from .models import AuthToken, CustomerInfo, Meal, WeeklyDelivery
+from .models import AuthToken, CustomerInfo, Meal, UpcomingDelivery, WeeklyDelivery
 
 __all__ = [
     "ApiError",
@@ -13,5 +13,6 @@ __all__ = [
     "HelloFreshClient",
     "HelloFreshError",
     "Meal",
+    "UpcomingDelivery",
     "WeeklyDelivery",
 ]

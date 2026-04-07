@@ -47,7 +47,18 @@ class Meal:
 
 @dataclass
 class WeeklyDelivery:
-    """Meals for a given delivery week."""
+    """Meals for a delivered week (from past-deliveries endpoint)."""
 
     week: str
+    meals: list[Meal] = field(default_factory=list)
+
+
+@dataclass
+class UpcomingDelivery:
+    """Details of the next scheduled delivery."""
+
+    week: str
+    cutoff_date: datetime
+    delivery_date: datetime
+    status: str
     meals: list[Meal] = field(default_factory=list)

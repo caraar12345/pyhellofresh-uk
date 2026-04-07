@@ -259,24 +259,43 @@ class HelloFreshClient:
     # ------------------------------------------------------------------
 
     async def _get(self, path: str, **params: str | int) -> dict:
-        """Perform an authenticated GET request."""
+        """Perform an authenticated GET request, with one CF-cookie retry."""
         session = self._ensure_session()
         access_token = await self._ensure_token()
-        async with session.get(
-            f"{_BASE_URL}{path}",
-            params={"country": _COUNTRY, "locale": _LOCALE, **params},
-            headers={
-                **_FETCH_HEADERS,
-                "Accept": "*/*",
-                "Authorization": f"Bearer {access_token}",
-            },
-        ) as resp:
-            if resp.status == 401:
-                raise AuthenticationError("Access token rejected by API")
-            if resp.status != 200:
-                text = await resp.text()
-                raise ApiError(resp.status, text)
-            return await resp.json()
+
+        for attempt in range(2):
+            async with session.get(
+                f"{_BASE_URL}{path}",
+                params={"country": _COUNTRY, "locale": _LOCALE, **params},
+                headers={
+                    **_FETCH_HEADERS,
+                    "Accept": "*/*",
+                    "Authorization": f"Bearer {access_token}",
+                },
+            ) as resp:
+                if resp.status == 401:
+                    raise AuthenticationError("Access token rejected by API")
+
+                if resp.status == 403:
+                    content_type = resp.headers.get("Content-Type", "")
+                    if "text/html" in content_type and self._flaresolverr_url and attempt == 0:
+                        _LOGGER.debug(
+                            "Cloudflare block on API call, refreshing cookies via FlareSolverr"
+                        )
+                        await self._acquire_cf_cookies()
+                        continue
+                    text = await resp.text()
+                    raise CloudflareBlockError(
+                        f"Cloudflare blocked the request to {path}"
+                    ) if "text/html" in content_type else ApiError(resp.status, text)
+
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise ApiError(resp.status, text)
+
+                return await resp.json()
+
+        raise CloudflareBlockError(f"Cloudflare block persisted after cookie refresh for {path}")
 
     async def get_customer_info(self) -> CustomerInfo:
         """Return customer account information."""

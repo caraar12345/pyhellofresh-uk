@@ -296,34 +296,32 @@ class HelloFreshClient:
             customer_plan_ids=data["customerPlanIds"],
         )
 
-    async def get_current_week_meals(
-        self,
-        subscription_id: int,
-        *,
-        week: str | None = None,
-    ) -> WeeklyDelivery:
-        """Return meals for the specified week (defaults to the current ISO week)."""
-        if week is None:
-            iso = datetime.now().isocalendar()
-            week = f"{iso.year}-W{iso.week:02d}"
+    async def get_last_delivery(self, subscription_id: int) -> WeeklyDelivery | None:
+        """Return the most recently delivered week with its meals.
+
+        Searches up to 4 weeks back and returns the most recent week that
+        has meal data (indicating delivery took place).
+        """
+        now = datetime.now()
+        range_start_dt = now - timedelta(weeks=4)
+        iso = range_start_dt.isocalendar()
+        range_start = f"{iso.year}-W{iso.week:02d}"
 
         data = await self._request(
             "/gw/my-deliveries/past-deliveries",
             self._std_params(**{
-                "from": week,
+                "from": range_start,
                 "rating-scale": "5",
                 "subscription": str(subscription_id),
             }),
         )
 
-        for entry in data.get("weeks", []):
-            if entry.get("week") == week:
-                return WeeklyDelivery(
-                    week=week,
-                    meals=_parse_meals(entry.get("meals", [])),
-                )
+        for entry in reversed(data.get("weeks", [])):
+            meals = _parse_meals(entry.get("meals", []))
+            if meals:
+                return WeeklyDelivery(week=entry["week"], meals=meals)
 
-        return WeeklyDelivery(week=week, meals=[])
+        return None
 
     async def get_upcoming_delivery(
         self,
@@ -332,12 +330,39 @@ class HelloFreshClient:
     ) -> UpcomingDelivery | None:
         """Return the next scheduled delivery with currently selected meals.
 
-        Returns None if no upcoming (non-delivered) delivery is found.
+        Returns the first non-delivered delivery regardless of whether its
+        cutoff has passed. Returns None if no upcoming delivery is found.
         """
+        items = await self._get_delivery_items()
+        next_item = _find_next_delivery(items)
+        if next_item is None:
+            return None
+        return await self._build_upcoming_delivery(next_item, subscription_id, customer_plan_id)
+
+    async def get_next_changeable_delivery(
+        self,
+        subscription_id: int,
+        customer_plan_id: str,
+    ) -> UpcomingDelivery | None:
+        """Return the next delivery that can still be changed (cutoff not yet passed).
+
+        Returns None if all upcoming deliveries are past their cutoff.
+        """
+        items = await self._get_delivery_items()
+        next_item = _find_next_changeable_delivery(items)
+        if next_item is None:
+            return None
+        return await self._build_upcoming_delivery(next_item, subscription_id, customer_plan_id)
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    async def _get_delivery_items(self) -> list[dict]:
+        """Fetch raw delivery items from current week through 8 weeks ahead."""
         now = datetime.now()
         iso = now.isocalendar()
         range_start = f"{iso.year}-W{iso.week:02d}"
-        # Look 8 weeks ahead to cover skipped/holiday weeks
         range_end_dt = now + timedelta(weeks=8)
         range_end_iso = range_end_dt.isocalendar()
         range_end = f"{range_end_iso.year}-W{range_end_iso.week:02d}"
@@ -346,17 +371,21 @@ class HelloFreshClient:
             "/gw/api/customers/me/deliveries",
             self._std_params(rangeStart=range_start, rangeEnd=range_end),
         )
+        return data.get("items", [])
 
-        next_item = _find_next_delivery(data.get("items", []))
-        if next_item is None:
-            return None
-
-        week = next_item["id"]
-        cutoff_date = datetime.fromisoformat(next_item["cutoffDate"])
-        delivery_date = datetime.fromisoformat(next_item["deliveryDate"])
-        status = next_item.get("status", "")
-        product = next_item.get("product", {})
-        delivery_option = next_item.get("deliveryOption", {})
+    async def _build_upcoming_delivery(
+        self,
+        item: dict,
+        subscription_id: int,
+        customer_plan_id: str,
+    ) -> UpcomingDelivery:
+        """Fetch the menu for a delivery item and return an UpcomingDelivery."""
+        week = item["id"]
+        cutoff_date = datetime.fromisoformat(item["cutoffDate"])
+        delivery_date = datetime.fromisoformat(item["deliveryDate"])
+        status = item.get("status", "")
+        product = item.get("product", {})
+        delivery_option = item.get("deliveryOption", {})
 
         menu_data = await self._request(
             "/gw/my-deliveries/menu",
@@ -399,6 +428,23 @@ def _find_next_delivery(items: list[dict]) -> dict | None:
     """Return the earliest non-delivered delivery, or None."""
     for item in items:
         if item.get("status") != "DELIVERED":
+            return item
+    return None
+
+
+def _find_next_changeable_delivery(items: list[dict]) -> dict | None:
+    """Return the earliest non-delivered delivery whose cutoff is still in the future."""
+    now = datetime.now(tz=UTC)
+    for item in items:
+        if item.get("status") == "DELIVERED":
+            continue
+        cutoff_str = item.get("cutoffDate", "")
+        if not cutoff_str:
+            continue
+        cutoff = datetime.fromisoformat(cutoff_str)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
+        if now < cutoff:
             return item
     return None
 

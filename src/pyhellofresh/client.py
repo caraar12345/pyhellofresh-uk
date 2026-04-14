@@ -299,27 +299,30 @@ class HelloFreshClient:
     async def get_last_delivery(self, subscription_id: int) -> WeeklyDelivery | None:
         """Return the most recently delivered week with its meals.
 
-        Searches up to 4 weeks back and returns the most recent week that
-        has meal data (indicating delivery took place).
+        The API returns weeks in descending order (most recent first) and
+        paginates via a ``nextWeek`` cursor. Follows up to 4 pages (~16 weeks
+        back) to handle longer subscription pauses.
         """
         now = datetime.now()
-        range_start_dt = now - timedelta(weeks=4)
-        iso = range_start_dt.isocalendar()
-        range_start = f"{iso.year}-W{iso.week:02d}"
+        iso = now.isocalendar()
+        from_week = f"{iso.year}-W{iso.week:02d}"
 
-        data = await self._request(
-            "/gw/my-deliveries/past-deliveries",
-            self._std_params(**{
-                "from": range_start,
-                "rating-scale": "5",
-                "subscription": str(subscription_id),
-            }),
-        )
-
-        for entry in reversed(data.get("weeks", [])):
-            meals = _parse_meals(entry.get("meals", []))
-            if meals:
-                return WeeklyDelivery(week=entry["week"], meals=meals)
+        for _ in range(4):
+            data = await self._request(
+                "/gw/my-deliveries/past-deliveries",
+                self._std_params(**{
+                    "from": from_week,
+                    "rating-scale": "5",
+                    "subscription": str(subscription_id),
+                }),
+            )
+            for entry in data.get("weeks", []):
+                meals = _parse_meals(entry.get("meals", []))
+                if meals:
+                    return WeeklyDelivery(week=entry["week"], meals=meals)
+            from_week = data.get("nextWeek")
+            if not from_week:
+                break
 
         return None
 

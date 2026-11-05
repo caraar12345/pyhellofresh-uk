@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from html import escape
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -42,6 +43,9 @@ _LOCALE = "en-GB"
 _TOKEN_EXPIRY_BUFFER = timedelta(seconds=60)
 _WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})$")
 _MAX_CONCURRENT_RECIPES = 4
+_BODY_SNIPPET_CHARS = 300
+# FlareSolverr is asked to solve for at most 60 s (maxTimeout); allow it some margin.
+_FLARESOLVERR_TIMEOUT = aiohttp.ClientTimeout(total=90)
 _LAST_KEYWORDS = frozenset({"last", "latest"})
 _NEXT_KEYWORDS = frozenset({"next", "upcoming"})
 _PDF_URL_TEMPLATE = f"{_BASE_URL}/recipecards/card/{{recipe_id}}-en-GB.pdf"
@@ -136,7 +140,9 @@ class HelloFreshClient:
                 headers=_NAV_HEADERS,
                 allow_redirects=True,
             ) as resp:
-                _LOGGER.debug("CF pre-visit status: %s", resp.status)
+                _LOGGER.debug(
+                    "CF pre-visit: HTTP %s, cookies now %s", resp.status, _cookie_names(session)
+                )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("CF pre-visit failed (continuing): %s", err)
 
@@ -146,24 +152,41 @@ class HelloFreshClient:
         self, session: aiohttp.ClientSession
     ) -> str:
         assert self._flaresolverr_url is not None
-        _LOGGER.debug("Acquiring CF cookies via FlareSolverr")
+        _LOGGER.debug("Acquiring CF cookies via FlareSolverr at %s", self._flaresolverr_url)
+        started = time.monotonic()
 
         async with session.post(
             f"{self._flaresolverr_url}/v1",
             json={"cmd": "request.get", "url": f"{_BASE_URL}/login", "maxTimeout": 60000},
+            timeout=_FLARESOLVERR_TIMEOUT,
         ) as resp:
             fls = await resp.json()
 
+        solution = fls.get("solution") or {}
+        _LOGGER.debug(
+            "FlareSolverr answered in %.0f ms: status=%s message=%r page HTTP %s",
+            (time.monotonic() - started) * 1000,
+            fls.get("status"),
+            fls.get("message"),
+            solution.get("status"),
+        )
         if fls.get("status") != "ok":
             raise ApiError(0, f"FlareSolverr: {fls.get('message', 'unknown error')}")
 
-        solution = fls["solution"]
         cookies = {c["name"]: c["value"] for c in solution.get("cookies", [])}
         if cookies:
             session.cookie_jar.update_cookies(cookies, URL(f"{_BASE_URL}/"))
-            _LOGGER.debug("Imported %d CF cookies from FlareSolverr", len(cookies))
+        # Names only: cookie values are credentials.
+        _LOGGER.debug(
+            "Imported %d cookies from FlareSolverr %s (cf_clearance present: %s)",
+            len(cookies),
+            sorted(cookies),
+            "cf_clearance" in cookies,
+        )
 
-        return solution.get("userAgent", _USER_AGENT)
+        user_agent = solution.get("userAgent", _USER_AGENT)
+        _log_client_hint_consistency(user_agent)
+        return user_agent
 
     # ------------------------------------------------------------------
     # Authentication
@@ -173,6 +196,10 @@ class HelloFreshClient:
         """Authenticate with email and password, returning a fresh token."""
         user_agent = await self._acquire_cf_cookies()
         session = self._ensure_session()
+        _LOGGER.debug(
+            "POST /gw/login with User-Agent %r and cookies %s", user_agent, _cookie_names(session)
+        )
+        started = time.monotonic()
 
         async with session.post(
             f"{_BASE_URL}/gw/login",
@@ -185,12 +212,25 @@ class HelloFreshClient:
                 "Referer": f"{_BASE_URL}/login",
             },
         ) as resp:
+            _LOGGER.debug(
+                "POST /gw/login -> HTTP %s in %.0f ms (%s)",
+                resp.status,
+                (time.monotonic() - started) * 1000,
+                resp.headers.get("Content-Type", ""),
+            )
             if resp.status == 401:
                 raise AuthenticationError("Invalid email or password")
             if resp.status == 403:
+                detail = await _describe_failure(resp)
+                _LOGGER.warning("Login refused: %s", detail)
+                hint = (
+                    "FlareSolverr is configured, so this may be a rate limit or an "
+                    "account/IP block rather than a Cloudflare challenge"
+                    if self._flaresolverr_url
+                    else "Provide a FlareSolverr URL to bypass this"
+                )
                 raise CloudflareBlockError(
-                    "Cloudflare blocked the login request. "
-                    "Provide a FlareSolverr URL to bypass this."
+                    f"Cloudflare blocked the login request ({detail}). {hint}."
                 )
             if resp.status != 200:
                 text = await resp.text()
@@ -220,6 +260,7 @@ class HelloFreshClient:
             },
         ) as resp:
             if resp.status != 200:
+                _LOGGER.debug("Auth0 refresh rejected: %s", await _describe_failure(resp))
                 raise AuthenticationError("Refresh token is invalid or expired")
             data = await resp.json()
 
@@ -274,6 +315,7 @@ class HelloFreshClient:
         access_token = await self._ensure_token()
 
         for attempt in range(2):
+            started = time.monotonic()
             async with session.get(
                 f"{_BASE_URL}{path}",
                 params=params,
@@ -283,6 +325,13 @@ class HelloFreshClient:
                     "Authorization": f"Bearer {access_token}",
                 },
             ) as resp:
+                _LOGGER.debug(
+                    "GET %s -> HTTP %s in %.0f ms (%s)",
+                    path,
+                    resp.status,
+                    (time.monotonic() - started) * 1000,
+                    resp.headers.get("Content-Type", ""),
+                )
                 if resp.status == 401:
                     raise AuthenticationError("Access token rejected by API")
 
@@ -296,7 +345,9 @@ class HelloFreshClient:
                         continue
                     text = await resp.text()
                     if "text/html" in content_type:
-                        raise CloudflareBlockError(f"Cloudflare blocked request to {path}")
+                        raise CloudflareBlockError(
+                            f"Cloudflare blocked request to {path} ({await _describe_failure(resp)})"
+                        )
                     raise ApiError(resp.status, text)
 
                 if resp.status != 200:
@@ -570,6 +621,65 @@ class HelloFreshClient:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _cookie_names(session: aiohttp.ClientSession) -> list[str]:
+    """Names of the cookies in the session's jar. Never the values: they are credentials."""
+    return sorted({cookie.key for cookie in session.cookie_jar})
+
+
+async def _describe_failure(resp: aiohttp.ClientResponse) -> str:
+    """One-line summary of an unexpected response, for errors and logs.
+
+    Status, content type, the Cloudflare headers, an HTML title and a short body
+    snippet. Request data, credentials and cookie values are never included.
+    """
+    try:
+        body = await resp.text(errors="replace")
+    except Exception:  # noqa: BLE001
+        body = ""
+    parts = [f"HTTP {resp.status}"]
+    for header in ("Content-Type", "Server", "CF-Ray", "CF-Mitigated", "Retry-After"):
+        if value := resp.headers.get(header):
+            parts.append(f"{header.lower()}={value}")
+    if title := re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S):
+        title_text = re.sub(r"\s+", " ", title.group(1)).strip()
+        parts.append(f"title={title_text!r}")
+    if snippet := re.sub(r"\s+", " ", body).strip()[:_BODY_SNIPPET_CHARS]:
+        parts.append(f"body={snippet!r}")
+    return ", ".join(parts)
+
+
+def _log_client_hint_consistency(user_agent: str) -> None:
+    """Log whether the browser hints we send agree with the User-Agent we send them with.
+
+    The ``sec-ch-ua*`` headers are fixed (Chrome on macOS), but the User-Agent comes
+    from FlareSolverr. A mismatch is a common bot-detection signal.
+    """
+    hint_platform = _FETCH_HEADERS["sec-ch-ua-platform"].strip('"')
+    hint_major = re.search(r'v="(\d+)"', _FETCH_HEADERS["sec-ch-ua"])
+    ua_major = re.search(r"Chrome/(\d+)", user_agent)
+    if "Macintosh" in user_agent:
+        ua_platform = "macOS"
+    elif "Windows" in user_agent:
+        ua_platform = "Windows"
+    elif "Android" in user_agent:
+        ua_platform = "Android"
+    elif "Linux" in user_agent or "X11" in user_agent:
+        ua_platform = "Linux"
+    else:
+        ua_platform = "unknown"
+    mismatch = ua_platform != hint_platform or (
+        hint_major and ua_major and hint_major.group(1) != ua_major.group(1)
+    )
+    _LOGGER.debug(
+        "Client hints say %s / Chrome %s; User-Agent says %s / Chrome %s%s",
+        hint_platform,
+        hint_major.group(1) if hint_major else "?",
+        ua_platform,
+        ua_major.group(1) if ua_major else "?",
+        " -> MISMATCH" if mismatch else "",
+    )
+
 
 def _to_iso_week(when: date | datetime | str) -> str:
     """Normalise a date, datetime or ``"YYYY-Www"`` string to an ISO week string."""

@@ -52,6 +52,14 @@ HelloFresh uses Cloudflare bot protection. The client works around this with:
 3. Optional FlareSolverr support (`flaresolverr_url` kwarg) for harder CF challenges — used **only** for this pre-visit, not for auth or API calls.
 4. A retry in `_request()`: on HTTP 403 with `text/html` content-type, re-acquire CF cookies and retry once.
 
+### Diagnostics
+
+Enable with `logging.getLogger("pyhellofresh").setLevel(logging.DEBUG)` (or `./scripts/live_check.py --debug`). DEBUG logs: every request (`GET <path> -> HTTP <status> in <ms> (<content type>)`), the Cloudflare pre-visit (HTTP status, cookie *names*), FlareSolverr's answer (status, message, page HTTP status, cookie names, whether `cf_clearance` is present), the User-Agent used for login, whether it agrees with the fixed `sec-ch-ua*` client hints (`-> MISMATCH` flags a likely bot-detection signal: the hints say Chrome 146 on macOS but the User-Agent comes from FlareSolverr), and Auth0 refresh rejections with Auth0's own error. A refused login also logs a WARNING.
+
+A 403 on login or on an API call raises `CloudflareBlockError` whose message carries `_describe_failure()`: HTTP status, content type, `server`, `cf-ray`, `cf-mitigated`, `retry-after`, the HTML `<title>` and the first 300 characters of the body. A real Cloudflare challenge has `cf-mitigated: challenge` and a "Just a moment..." title; a JSON 403 is more likely HelloFresh itself (rate limit or account lock). The FlareSolverr pre-visit times out after 90 s (`_FLARESOLVERR_TIMEOUT`) instead of hanging.
+
+**Never log or put in an error:** passwords, tokens, the `Authorization` header, cookie values or request bodies. `tests/test_diagnostics.py` asserts this; keep it true when adding logging.
+
 ### Authentication
 
 - `POST /gw/login` → returns `access_token` (expires ~30 min) + `refresh_token` (expires ~60 days).

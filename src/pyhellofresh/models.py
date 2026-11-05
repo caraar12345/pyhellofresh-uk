@@ -132,8 +132,9 @@ class RecipeStep:
     """One step of a recipe's method.
 
     ``instructions`` is plain text, ``instructions_html`` is HelloFresh's HTML
-    and ``instructions_markdown`` is that HTML converted to safe CommonMark
-    (bold ingredient names, italic tips) by ``html_to_markdown``.
+    and ``instructions_markdown`` is that HTML converted to safe Markdown by
+    ``html_to_markdown``: bold ingredient names, and ``IMPORTANT:``/``TIP:``
+    callouts as GitHub-flavoured Markdown alerts (``> [!IMPORTANT]``).
     """
 
     index: int

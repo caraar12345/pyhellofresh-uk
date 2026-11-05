@@ -67,14 +67,14 @@ All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` 
 - Step `utensils` are IDs resolved against the top-level `utensils` list; ingredient `allergens` are IDs into `Recipe.allergens`.
 - `shipped: false` ingredients are pantry items (`recipe.pantry_ingredients`).
 - `prepTime`/`totalTime` are ISO 8601 durations; `prep_time_minutes`/`total_time_minutes` convert them.
-- The API's `instructionsMarkdown` field actually contains HTML, so it is ignored. `RecipeStep.instructions_markdown` is generated from `instructionsHTML` by `markdown.html_to_markdown()` instead: allow-listed tags only (p/br/strong/em/lists/links), text escaped, links only for http(s)/mailto, no raw HTML passed through. Whitespace inside `<strong>` is moved outside the `**` markers (HF often writes `the<strong> water</strong>`).
+- The API's `instructionsMarkdown` field actually contains HTML, so it is ignored. `RecipeStep.instructions_markdown` is generated from `instructionsHTML` by `markdown.html_to_markdown()` instead: allow-listed tags only (p/br/strong/em/lists/links), text escaped, links only for http(s)/mailto, no raw HTML passed through. Whitespace inside `<strong>` is moved outside the `**` markers (HF often writes `the<strong> water</strong>`). Upper-case bold labels `IMPORTANT:`/`TIP:`/`NOTE:`/`WARNING:`/`CAUTION:` at paragraph level are split out into GFM alerts (`> [!IMPORTANT]`); not inside lists or nested emphasis. `alerts=False` gives plain CommonMark.
 - `get_recipes(ids)` caps concurrency at 4 (`_MAX_CONCURRENT_RECIPES`). `_ensure_token()` holds an `asyncio.Lock` so parallel requests share a single refresh/re-auth.
 
 ### get_recipes_for_week
 
-`get_recipes_for_week(when, *, subscription_id=None, customer_plan_id=None)`; `when` is a `date`/`datetime` (ISO week taken), a `"YYYY-Www"` string, or `"latest"` (= `get_last_delivery`, i.e. most recently *delivered* box).
+`get_recipes_for_week(when, *, subscription_id=None, customer_plan_id=None)`; `when` is a `date`/`datetime` (ISO week taken), a `"YYYY-Www"` string, `"last"` (= `get_last_delivery`, most recently *delivered* box) or `"next"` (= `get_upcoming_delivery`, next scheduled box regardless of cutoff). Named to match `get_last_delivery`/`sensor.hellofresh_next_delivery`.
 
-1. Missing IDs → one `get_customer_info()` call (active subscription, first plan ID; plan ID not fetched for `"latest"`).
+1. Missing IDs → one `get_customer_info()` call (active subscription, first plan ID; plan ID not fetched for `"last"`).
 2. `deliveries?rangeStart=week&rangeEnd=week` → if an item exists and isn't `DELIVERED`, meals come from the menu selection (needs `customer_plan_id`).
 3. Otherwise `past-deliveries?from=week`, matching the entry whose `week` equals the requested one.
 4. Recipe IDs are de-duplicated (order kept) and fetched with `get_recipes()`. No box that week → `[]`.

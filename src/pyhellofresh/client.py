@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 from urllib.parse import quote
 
 import aiohttp
@@ -404,7 +405,7 @@ class HelloFreshClient:
 
     async def get_recipes_for_week(
         self,
-        when: date | datetime | str,
+        when: date | datetime | Literal["last", "next"] | str,
         *,
         subscription_id: int | None = None,
         customer_plan_id: str | None = None,
@@ -412,8 +413,11 @@ class HelloFreshClient:
         """Return full recipes for the meals in your box for a given week.
 
         ``when`` is any ``date``/``datetime`` (its ISO week is used), an ISO
-        week string such as ``"2026-W45"``, or ``"latest"`` for the most
-        recently *delivered* box.
+        week string such as ``"2026-W45"``, or:
+
+        * ``"last"``: the most recently delivered box (as ``get_last_delivery``).
+        * ``"next"``: the next scheduled box, whether or not its cutoff has
+          passed (as ``get_upcoming_delivery``).
 
         Delivered weeks are read from past deliveries; weeks not yet delivered
         use the meals currently selected on the menu. Returns an empty list
@@ -424,16 +428,21 @@ class HelloFreshClient:
         call when not given.
         """
         # customer_plan_id is only needed for weeks not yet delivered (menu API).
-        if subscription_id is None or (customer_plan_id is None and when != "latest"):
+        if subscription_id is None or (customer_plan_id is None and when != "last"):
             info = await self.get_customer_info()
             if subscription_id is None:
                 subscription_id = info.active_subscription_id
             if customer_plan_id is None:
                 customer_plan_id = info.customer_plan_ids[0] if info.customer_plan_ids else ""
 
-        if when == "latest":
+        if when == "last":
             last = await self.get_last_delivery(subscription_id)
             meals = last.meals if last else []
+        elif when == "next":
+            if not customer_plan_id:
+                raise ValueError("customer_plan_id is required for 'next'")
+            upcoming = await self.get_upcoming_delivery(subscription_id, customer_plan_id)
+            meals = upcoming.meals if upcoming else []
         else:
             week = _to_iso_week(when)
             meals = await self._meals_for_week(week, subscription_id, customer_plan_id)
@@ -546,7 +555,7 @@ def _to_iso_week(when: date | datetime | str) -> str:
         if _WEEK_RE.match(when):
             return when
         raise ValueError(
-            f"Expected a date, datetime, ISO week like '2026-W45', or 'latest'; got {when!r}"
+            f"Expected a date, datetime, ISO week like '2026-W45', 'last' or 'next'; got {when!r}"
         )
     if isinstance(when, date):  # datetime is a subclass of date
         iso = when.isocalendar()

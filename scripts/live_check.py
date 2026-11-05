@@ -253,8 +253,16 @@ async def run(args: argparse.Namespace) -> int:
         plan_id = info.customer_plan_ids[0] if info.customer_plan_ids else ""
 
         # -- token refresh ---------------------------------------------
-        async def probe_auth0(refresh_token: str) -> None:
+        def describe_token(token: str, expires_at: datetime) -> str:
+            """Shape of a token, never its value."""
+            if not token:
+                return "EMPTY"
+            kind = "JWT-like" if token.count(".") == 2 else "opaque"
+            return f"{kind}, {len(token)} chars, expires {expires_at:%Y-%m-%d}"
+
+        async def probe_auth0(refresh_token: str, expires_at: datetime) -> None:
             """Repeat the failed refresh and report why Auth0 said no (never prints tokens)."""
+            r.info(f"refresh token sent to Auth0: {describe_token(refresh_token, expires_at)}")
             try:
                 async with client._ensure_session().post(
                     f"{_AUTH0_URL}/oauth/token",
@@ -277,6 +285,7 @@ async def run(args: argparse.Namespace) -> int:
         async def refresh() -> None:
             assert client._token is not None
             old_refresh_token = client._token.refresh_token
+            old_refresh_expires = client._token.refresh_expires_at
             refreshed = False
             original = client._refresh_token
 
@@ -301,7 +310,7 @@ async def run(args: argparse.Namespace) -> int:
                 r.info("Auth0 refresh succeeded")
             else:
                 r.warn("Auth0 refresh failed; client fell back to email/password login")
-                await probe_auth0(old_refresh_token)
+                await probe_auth0(old_refresh_token, old_refresh_expires)
 
         await r.check("token refresh (Auth0)", refresh)
 

@@ -345,7 +345,7 @@ async def run(args: argparse.Namespace) -> int:
 
         nxt = await r.check("get_upcoming_delivery", upcoming)
 
-        async def changeable() -> None:
+        async def changeable() -> UpcomingDelivery:
             if not plan_id:
                 raise Skip("no customer plan id")
             ch = await client.get_next_changeable_delivery(sub_id, plan_id)
@@ -356,8 +356,9 @@ async def run(args: argparse.Namespace) -> int:
             r.info(f"{ch.week}: change by {ch.cutoff_date:%a %d %b %H:%M}, {len(ch.meals)} meals")
             if nxt is not None:
                 r.expect(ch.week >= nxt.week, "changeable week is before the next delivery")
+            return ch
 
-        await r.check("get_next_changeable_delivery", changeable)
+        changeable_delivery = await r.check("get_next_changeable_delivery", changeable)
 
         # -- recipe ----------------------------------------------------
         recipe_id = (
@@ -524,6 +525,20 @@ async def run(args: argparse.Namespace) -> int:
                 raise Skip("no last or next delivery to compare against")
 
         await r.check("get_recipes_for_week by ISO week / date", by_date)
+
+        async def further_ahead() -> None:
+            # Regression guard: the deliveries range start is exclusive, so a week
+            # beyond the very next box used to come back empty.
+            ch = changeable_delivery
+            if ch is None or not ch.meals:
+                raise Skip("no changeable delivery with selected meals")
+            await for_week(ch.week, "changeable")
+            same_recipes(
+                f"get_recipes_for_week({ch.week!r})", week_ids["changeable"],
+                "get_next_changeable_delivery", _ids(ch.meals),
+            )
+
+        await r.check("get_recipes_for_week for the next changeable week", further_ahead)
 
         async def bad_keyword() -> None:
             try:

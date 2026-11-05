@@ -12,7 +12,7 @@ Usage (from the repo root, so uv uses the project environment with the local pac
     export HELLOFRESH_PASSWORD=...
     export HELLOFRESH_FLARESOLVERR_URL=http://flaresolverr:8191   # optional
     ./scripts/live_check.py
-    ./scripts/live_check.py --token-cache ~/.cache/hellofresh-token.json
+    ./scripts/live_check.py --token-cache ~/.cache/hellofresh-token.json --skip-refresh-check
     ./scripts/live_check.py --recipe-id 6a98470271b095d5fbaf833f --dump /tmp/hf -v
 
 Exit code is 0 when nothing failed (warnings allowed), 1 otherwise.
@@ -312,7 +312,11 @@ async def run(args: argparse.Namespace) -> int:
                 r.warn("Auth0 refresh failed; client fell back to email/password login")
                 await probe_auth0(old_refresh_token, old_refresh_expires)
 
-        await r.check("token refresh (Auth0)", refresh)
+        if args.skip_refresh_check:
+            r.results.append(Result("token refresh (Auth0)", "SKIP", 0.0, ["--skip-refresh-check"]))
+            print(f"{_badge('SKIP')}  token refresh (Auth0)  (--skip-refresh-check)")
+        else:
+            await r.check("token refresh (Auth0)", refresh)
 
         # -- deliveries ------------------------------------------------
         async def last_delivery() -> WeeklyDelivery:
@@ -560,6 +564,9 @@ def main() -> None:
     parser.add_argument("--recipe-id", help="recipe to inspect (default: first meal of your last box)")
     parser.add_argument("--token-cache", type=Path,
                         help="JSON file to reuse/save the auth token (written with 0600 permissions)")
+    parser.add_argument("--skip-refresh-check", action="store_true",
+                        help="skip the forced Auth0 refresh, which falls back to a full login "
+                             "while Auth0 rejects the token; with --token-cache this makes no login at all")
     parser.add_argument("--dump", type=Path, metavar="DIR",
                         help="save raw API responses here (contains account data)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show details for every check")

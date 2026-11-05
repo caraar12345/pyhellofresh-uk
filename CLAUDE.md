@@ -8,8 +8,9 @@ Async Python library for the undocumented HelloFresh UK REST API.
 src/pyhellofresh/
   __init__.py      # Public exports
   client.py        # HelloFreshClient — all API logic lives here
-  models.py        # Dataclasses: AuthToken, CustomerInfo, Meal, WeeklyDelivery, UpcomingDelivery
+  models.py        # Dataclasses: AuthToken, CustomerInfo, Meal, WeeklyDelivery, UpcomingDelivery, Recipe (+ Ingredient, IngredientAmount, NutritionValue, RecipeStep, Allergen, Utensil, Tag, Cuisine)
   exceptions.py    # HelloFreshError, AuthenticationError, CloudflareBlockError, ApiError
+tests/             # pytest + aioresponses; fixtures/ holds trimmed real API responses
 pyproject.toml     # uv project, build backend: hatchling
 .github/workflows/publish.yml  # Publishes to PyPI on GitHub release (OIDC trusted publisher)
 ```
@@ -53,8 +54,19 @@ HelloFresh uses Cloudflare bot protection. The client works around this with:
 | `GET` | `/gw/my-deliveries/past-deliveries` | Meals for a given ISO week |
 | `GET` | `/gw/api/customers/me/deliveries` | Upcoming delivery schedule (cutoff/delivery dates) |
 | `GET` | `/gw/my-deliveries/menu` | Full menu for a week; `selection.quantity > 0` = chosen meal |
+| `GET` | `/gw/recipes/recipes/{id}` | Full recipe: ingredients, per-serving `yields`, nutrition, steps, allergens, utensils, tags |
 
 All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` which uses `locale` only.
+
+### Recipe details
+
+`get_recipe(recipe_id)` (and `get_recipes([...])`, concurrent) take a `Meal.id` and return a `Recipe`.
+
+- `yields` in the API lists `{id, amount, unit}` per serving count; the parser joins these onto `ingredients` by ID → `Recipe.yields: dict[int, list[IngredientAmount]]`, via `recipe.ingredients_for(servings)`.
+- Step `utensils` are IDs resolved against the top-level `utensils` list; ingredient `allergens` are IDs into `Recipe.allergens`.
+- `shipped: false` ingredients are pantry items (`recipe.pantry_ingredients`).
+- `prepTime`/`totalTime` are ISO 8601 durations; `prep_time_minutes`/`total_time_minutes` convert them.
+- The API's `instructionsMarkdown` field actually contains HTML, so it is ignored; use `instructions` (plain) or `instructions_html`.
 
 ### Week strings
 

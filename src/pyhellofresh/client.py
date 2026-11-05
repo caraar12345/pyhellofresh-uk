@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from urllib.parse import quote
 
 import aiohttp
 from yarl import URL
 
 from .exceptions import ApiError, AuthenticationError, CloudflareBlockError
-from .models import AuthToken, CustomerInfo, Meal, UpcomingDelivery, WeeklyDelivery
+from .models import (
+    Allergen,
+    AuthToken,
+    Cuisine,
+    CustomerInfo,
+    Ingredient,
+    IngredientAmount,
+    Meal,
+    NutritionValue,
+    Recipe,
+    RecipeStep,
+    Tag,
+    UpcomingDelivery,
+    Utensil,
+    WeeklyDelivery,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -357,6 +374,21 @@ class HelloFreshClient:
             return None
         return await self._build_upcoming_delivery(next_item, subscription_id, customer_plan_id)
 
+    async def get_recipe(self, recipe_id: str) -> Recipe:
+        """Return full details for a recipe: ingredients, quantities per
+        serving count, nutrition, method steps, allergens, utensils and tags.
+
+        ``recipe_id`` is the ``Meal.id`` returned by the delivery methods.
+        """
+        data = await self._request(
+            f"/gw/recipes/recipes/{quote(recipe_id, safe='')}", self._std_params()
+        )
+        return _parse_recipe(data)
+
+    async def get_recipes(self, recipe_ids: list[str]) -> list[Recipe]:
+        """Fetch several recipes concurrently, preserving input order."""
+        return list(await asyncio.gather(*(self.get_recipe(r) for r in recipe_ids)))
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -482,4 +514,124 @@ def _parse_meal_from_menu(item: dict) -> Meal:
         prep_time=r.get("prepTime"),
         total_time=r.get("totalTime"),
         category=r.get("category"),
+    )
+
+
+def _parse_recipe(data: dict) -> Recipe:
+    utensils = [
+        Utensil(id=u["id"], name=u.get("name", ""), type=u.get("type", ""))
+        for u in data.get("utensils") or []
+        if "id" in u
+    ]
+    utensils_by_id = {u.id: u for u in utensils}
+
+    ingredients = [
+        Ingredient(
+            id=i["id"],
+            name=i.get("name", ""),
+            slug=i.get("slug", ""),
+            image_url=i.get("imageLink"),
+            shipped=i.get("shipped", True),
+            allergens=list(i.get("allergens") or []),
+            family=(i.get("family") or {}).get("name"),
+        )
+        for i in data.get("ingredients") or []
+        if "id" in i
+    ]
+    ingredients_by_id = {i.id: i for i in ingredients}
+
+    yields: dict[int, list[IngredientAmount]] = {}
+    for y in data.get("yields") or []:
+        servings = y.get("yields")
+        if servings is None:
+            continue
+        yields[int(servings)] = [
+            IngredientAmount(
+                ingredient=ingredients_by_id[a["id"]],
+                amount=a.get("amount"),
+                unit=a.get("unit"),
+            )
+            for a in y.get("ingredients") or []
+            if a.get("id") in ingredients_by_id
+        ]
+
+    steps = []
+    for st in data.get("steps") or []:
+        images = st.get("images") or []
+        steps.append(
+            RecipeStep(
+                index=st.get("index", len(steps) + 1),
+                instructions=st.get("instructions") or "",
+                instructions_html=st.get("instructionsHTML") or "",
+                image_urls=[img["link"] for img in images if img.get("link")],
+                image_caption=next(
+                    (img["caption"] for img in images if img.get("caption")), None
+                ),
+                utensils=[
+                    utensils_by_id[u] for u in st.get("utensils") or [] if u in utensils_by_id
+                ],
+            )
+        )
+
+    return Recipe(
+        id=data["id"],
+        uuid=data.get("uuid", ""),
+        name=data.get("name", ""),
+        slug=data.get("slug", ""),
+        headline=data.get("headline") or "",
+        description=data.get("descriptionMarkdown") or data.get("description") or "",
+        description_html=data.get("descriptionHTML") or "",
+        image_url=data.get("imageLink"),
+        website_url=data.get("websiteUrl") or "",
+        card_url=data.get("cardLink"),
+        prep_time=data.get("prepTime"),
+        total_time=data.get("totalTime"),
+        difficulty=data.get("difficulty"),
+        average_rating=data.get("averageRating"),
+        ratings_count=data.get("ratingsCount") or 0,
+        favorites_count=data.get("favoritesCount") or 0,
+        serving_size_grams=data.get("servingSize"),
+        unique_recipe_code=data.get("uniqueRecipeCode"),
+        allergens=[
+            Allergen(
+                id=a["id"],
+                name=a.get("name", ""),
+                slug=a.get("slug", ""),
+                icon_url=a.get("iconLink"),
+                traces_of=a.get("tracesOf", False),
+                triggers_traces_of=a.get("triggersTracesOf", False),
+            )
+            for a in data.get("allergens") or []
+            if "id" in a
+        ],
+        ingredients=ingredients,
+        yields=yields,
+        nutrition=[
+            NutritionValue(name=n["name"], amount=n["amount"], unit=n.get("unit", ""))
+            for n in data.get("nutrition") or []
+            if "name" in n and n.get("amount") is not None
+        ],
+        steps=steps,
+        utensils=utensils,
+        tags=[
+            Tag(
+                id=t["id"],
+                name=t.get("name", ""),
+                slug=t.get("slug", ""),
+                type=t.get("type", ""),
+                display_label=t.get("displayLabel", False),
+            )
+            for t in data.get("tags") or []
+            if "id" in t
+        ],
+        cuisines=[
+            Cuisine(
+                id=c["id"],
+                name=c.get("name", ""),
+                slug=c.get("slug", ""),
+                icon_url=c.get("iconLink"),
+            )
+            for c in data.get("cuisines") or []
+            if "id" in c
+        ],
     )

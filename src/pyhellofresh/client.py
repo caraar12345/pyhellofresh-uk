@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 from urllib.parse import quote
 
 import aiohttp
 from yarl import URL
 
 from .exceptions import ApiError, AuthenticationError, CloudflareBlockError
+from .markdown import html_to_markdown
 from .models import (
     Allergen,
     AuthToken,
@@ -36,6 +38,8 @@ _AUTH0_CLIENT_ID = "B1n0Q24hv7e4AHc7yG1WwQyuMvpCAIya"
 _COUNTRY = "GB"
 _LOCALE = "en-GB"
 _TOKEN_EXPIRY_BUFFER = timedelta(seconds=60)
+_WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
+_MAX_CONCURRENT_RECIPES = 4
 _PDF_URL_TEMPLATE = f"{_BASE_URL}/recipecards/card/{{recipe_id}}-en-GB.pdf"
 
 _USER_AGENT = (
@@ -91,6 +95,8 @@ class HelloFreshClient:
         self._flaresolverr_url = flaresolverr_url.rstrip("/") if flaresolverr_url else None
         self._session: aiohttp.ClientSession | None = None
         self._token: AuthToken | None = None
+        self._token_lock = asyncio.Lock()
+        self._recipe_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_RECIPES)
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -228,6 +234,12 @@ class HelloFreshClient:
         return token
 
     async def _ensure_token(self) -> str:
+        # Serialise so concurrent requests (e.g. get_recipes) share one
+        # authenticate/refresh instead of each starting their own.
+        async with self._token_lock:
+            return await self._ensure_token_locked()
+
+    async def _ensure_token_locked(self) -> str:
         if self._token is None:
             await self.authenticate()
             assert self._token is not None
@@ -380,18 +392,87 @@ class HelloFreshClient:
 
         ``recipe_id`` is the ``Meal.id`` returned by the delivery methods.
         """
-        data = await self._request(
-            f"/gw/recipes/recipes/{quote(recipe_id, safe='')}", self._std_params()
-        )
+        async with self._recipe_semaphore:
+            data = await self._request(
+                f"/gw/recipes/recipes/{quote(recipe_id, safe='')}", self._std_params()
+            )
         return _parse_recipe(data)
 
     async def get_recipes(self, recipe_ids: list[str]) -> list[Recipe]:
-        """Fetch several recipes concurrently, preserving input order."""
+        """Fetch several recipes concurrently (at most 4 in flight), preserving input order."""
         return list(await asyncio.gather(*(self.get_recipe(r) for r in recipe_ids)))
+
+    async def get_recipes_for_week(
+        self,
+        when: date | datetime | str,
+        *,
+        subscription_id: int | None = None,
+        customer_plan_id: str | None = None,
+    ) -> list[Recipe]:
+        """Return full recipes for the meals in your box for a given week.
+
+        ``when`` is any ``date``/``datetime`` (its ISO week is used), an ISO
+        week string such as ``"2026-W45"``, or ``"latest"`` for the most
+        recently *delivered* box.
+
+        Delivered weeks are read from past deliveries; weeks not yet delivered
+        use the meals currently selected on the menu. Returns an empty list
+        when there is no box that week (skipped, paused, or out of range).
+
+        ``subscription_id`` and ``customer_plan_id`` default to the account's
+        active subscription and first customer plan, looked up with one extra
+        call when not given.
+        """
+        # customer_plan_id is only needed for weeks not yet delivered (menu API).
+        if subscription_id is None or (customer_plan_id is None and when != "latest"):
+            info = await self.get_customer_info()
+            if subscription_id is None:
+                subscription_id = info.active_subscription_id
+            if customer_plan_id is None:
+                customer_plan_id = info.customer_plan_ids[0] if info.customer_plan_ids else ""
+
+        if when == "latest":
+            last = await self.get_last_delivery(subscription_id)
+            meals = last.meals if last else []
+        else:
+            week = _to_iso_week(when)
+            meals = await self._meals_for_week(week, subscription_id, customer_plan_id)
+
+        recipe_ids = list(dict.fromkeys(m.id for m in meals))
+        return await self.get_recipes(recipe_ids)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _meals_for_week(
+        self, week: str, subscription_id: int, customer_plan_id: str
+    ) -> list[Meal]:
+        """Meals in the box for ``week``: menu selection if upcoming, else past deliveries."""
+        data = await self._request(
+            "/gw/api/customers/me/deliveries",
+            self._std_params(rangeStart=week, rangeEnd=week),
+        )
+        item = next((i for i in data.get("items", []) if i.get("id") == week), None)
+        if item is not None and item.get("status") != "DELIVERED":
+            if not customer_plan_id:
+                raise ValueError("customer_plan_id is required for weeks not yet delivered")
+            upcoming = await self._build_upcoming_delivery(item, subscription_id, customer_plan_id)
+            return upcoming.meals
+
+        past = await self._request(
+            "/gw/my-deliveries/past-deliveries",
+            self._std_params(**{
+                "from": week,
+                "rating-scale": "5",
+                "subscription": str(subscription_id),
+            }),
+        )
+        for entry in past.get("weeks", []):
+            if entry.get("week") == week:
+                return _parse_meals(entry.get("meals", []))
+        return []
+
 
     async def _get_delivery_items(self) -> list[dict]:
         """Fetch raw delivery items from current week through 8 weeks ahead."""
@@ -458,6 +539,20 @@ class HelloFreshClient:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _to_iso_week(when: date | datetime | str) -> str:
+    """Normalise a date, datetime or ``"YYYY-Www"`` string to an ISO week string."""
+    if isinstance(when, str):
+        if _WEEK_RE.match(when):
+            return when
+        raise ValueError(
+            f"Expected a date, datetime, ISO week like '2026-W45', or 'latest'; got {when!r}"
+        )
+    if isinstance(when, date):  # datetime is a subclass of date
+        iso = when.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    raise TypeError(f"Unsupported type for week: {type(when).__name__}")
+
 
 def _find_next_delivery(items: list[dict]) -> dict | None:
     """Return the earliest non-delivered delivery, or None."""
@@ -563,6 +658,9 @@ def _parse_recipe(data: dict) -> Recipe:
                 index=st.get("index", len(steps) + 1),
                 instructions=st.get("instructions") or "",
                 instructions_html=st.get("instructionsHTML") or "",
+                instructions_markdown=html_to_markdown(st.get("instructionsHTML"))
+                or st.get("instructions")
+                or "",
                 image_urls=[img["link"] for img in images if img.get("link")],
                 image_caption=next(
                     (img["caption"] for img in images if img.get("caption")), None

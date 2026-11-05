@@ -129,11 +129,17 @@ class Utensil:
 
 @dataclass
 class RecipeStep:
-    """One step of a recipe's method."""
+    """One step of a recipe's method.
+
+    ``instructions`` is plain text, ``instructions_html`` is HelloFresh's HTML
+    and ``instructions_markdown`` is that HTML converted to safe CommonMark
+    (bold ingredient names, italic tips) by ``html_to_markdown``.
+    """
 
     index: int
     instructions: str
     instructions_html: str
+    instructions_markdown: str
     image_urls: list[str] = field(default_factory=list)
     image_caption: str | None = None
     utensils: list[Utensil] = field(default_factory=list)

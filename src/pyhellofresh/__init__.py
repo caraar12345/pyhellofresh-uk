@@ -2,6 +2,7 @@
 
 from .client import HelloFreshClient
 from .exceptions import ApiError, AuthenticationError, CloudflareBlockError, HelloFreshError
+from .markdown import html_to_markdown
 from .models import (
     Allergen,
     AuthToken,
@@ -39,4 +40,5 @@ __all__ = [
     "UpcomingDelivery",
     "Utensil",
     "WeeklyDelivery",
+    "html_to_markdown",
 ]

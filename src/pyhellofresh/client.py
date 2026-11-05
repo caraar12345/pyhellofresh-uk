@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from html import escape
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from urllib.parse import quote
@@ -444,10 +445,18 @@ class HelloFreshClient:
             last = await self.get_last_delivery(subscription_id)
             meals = last.meals if last else []
         elif is_next:
-            if not customer_plan_id:
-                raise ValueError(f"customer_plan_id is required for {when!r}")
-            upcoming = await self.get_upcoming_delivery(subscription_id, customer_plan_id)
-            meals = upcoming.meals if upcoming else []
+            # Look for a delivery first: the plan id is only needed for the menu lookup,
+            # so "nothing scheduled" returns [] even for an account without plan ids.
+            item = _find_next_delivery(await self._get_delivery_items())
+            if item is None:
+                meals = []
+            else:
+                if not customer_plan_id:
+                    raise ValueError(f"customer_plan_id is required for {when!r}")
+                upcoming = await self._build_upcoming_delivery(
+                    item, subscription_id, customer_plan_id
+                )
+                meals = upcoming.meals
         else:
             week = _to_iso_week(when)
             meals = await self._meals_for_week(week, subscription_id, customer_plan_id)
@@ -494,7 +503,8 @@ class HelloFreshClient:
         """Fetch raw delivery items from current week through 8 weeks ahead."""
         now = datetime.now()
         iso = now.isocalendar()
-        range_start = f"{iso.year}-W{iso.week:02d}"
+        # rangeStart is exclusive, so start from the previous week to include this one.
+        range_start = _previous_iso_week(f"{iso.year}-W{iso.week:02d}")
         range_end_dt = now + timedelta(weeks=8)
         range_end_iso = range_end_dt.isocalendar()
         range_end = f"{range_end_iso.year}-W{range_end_iso.week:02d}"
@@ -568,6 +578,16 @@ def _to_iso_week(when: date | datetime | str) -> str:
         iso = when.isocalendar()
         return f"{iso.year}-W{iso.week:02d}"
     raise TypeError(f"Unsupported type for week: {type(when).__name__}")
+
+
+def _plain_to_markdown(text: str | None) -> str:
+    """Plain-text step instructions as safe Markdown, one paragraph per line.
+
+    Used when a step has no usable HTML. The text is HTML-escaped first so that
+    ``html_to_markdown`` treats it purely as text and escapes Markdown characters.
+    """
+    paragraphs = (f"<p>{escape(line)}</p>" for line in (text or "").splitlines() if line.strip())
+    return html_to_markdown("".join(paragraphs))
 
 
 def _previous_iso_week(week: str) -> str:
@@ -684,8 +704,7 @@ def _parse_recipe(data: dict) -> Recipe:
                 instructions=st.get("instructions") or "",
                 instructions_html=st.get("instructionsHTML") or "",
                 instructions_markdown=html_to_markdown(st.get("instructionsHTML"))
-                or st.get("instructions")
-                or "",
+                or _plain_to_markdown(st.get("instructions")),
                 image_urls=[img["link"] for img in images if img.get("link")],
                 image_caption=next(
                     (img["caption"] for img in images if img.get("caption")), None

@@ -105,6 +105,26 @@ def test_minimal_payload() -> None:
     assert recipe.prep_time_minutes is None
 
 
+def test_step_without_html_falls_back_to_escaped_plain_text() -> None:
+    """The plain-text fallback must go through the sanitiser too."""
+    recipe = _parse_recipe(
+        {
+            "id": "x",
+            "steps": [
+                {
+                    "index": 1,
+                    "instructions": "[x](javascript:alert(1)) *a*\nSecond <script>bad()</script> line",
+                },
+                {"index": 2, "instructions": ""},
+            ],
+        }
+    )
+    assert recipe.steps[0].instructions_markdown == (
+        "\\[x\\](javascript:alert(1)) \\*a\\*\n\nSecond \\<script\\>bad()\\</script\\> line"
+    )
+    assert recipe.steps[1].instructions_markdown == ""
+
+
 def _client_with_token() -> HelloFreshClient:
     client = HelloFreshClient("user@example.com", "pw")
     now = datetime.now(tz=UTC)

@@ -80,7 +80,7 @@ All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` 
 - Step `utensils` are IDs resolved against the top-level `utensils` list; ingredient `allergens` are IDs into `Recipe.allergens`.
 - `shipped: false` ingredients are pantry items (`recipe.pantry_ingredients`).
 - `prepTime`/`totalTime` are ISO 8601 durations; `prep_time_minutes`/`total_time_minutes` convert them.
-- The API's `instructionsMarkdown` field actually contains HTML, so it is ignored. `RecipeStep.instructions_markdown` is generated from `instructionsHTML` by `markdown.html_to_markdown()` instead: allow-listed tags only (p/br/strong/em/lists/links), text escaped, links only for http(s)/mailto, no raw HTML passed through. Whitespace inside `<strong>` is moved outside the `**` markers (HF often writes `the<strong> water</strong>`). Upper-case bold labels `IMPORTANT:`/`TIP:`/`NOTE:`/`WARNING:`/`CAUTION:` at paragraph level are split out into GFM alerts (`> [!IMPORTANT]`); not inside lists or nested emphasis. `alerts=False` gives plain CommonMark.
+- The API's `instructionsMarkdown` field actually contains HTML, so it is ignored. `RecipeStep.instructions_markdown` is generated from `instructionsHTML` by `markdown.html_to_markdown()` instead: allow-listed tags only (p/br/strong/em/lists/links), text escaped, links only for http(s)/mailto, no raw HTML passed through. Whitespace inside `<strong>` is moved outside the `**` markers (HF often writes `the<strong> water</strong>`). Upper-case bold labels `IMPORTANT:`/`TIP:`/`NOTE:`/`WARNING:`/`CAUTION:` at paragraph level are split out into GFM alerts (`> [!IMPORTANT]`); not inside lists or nested emphasis. `alerts=False` gives plain CommonMark. If a step has no usable `instructionsHTML`, its plain `instructions` text is HTML-escaped, wrapped one `<p>` per line and sent through the same converter (`_plain_to_markdown`), so `instructions_markdown` is never raw API text.
 - `get_recipes(ids)` caps concurrency at 4 (`_MAX_CONCURRENT_RECIPES`). `_ensure_token()` holds an `asyncio.Lock` so parallel requests share a single refresh/re-auth.
 
 ### get_recipes_for_week
@@ -91,6 +91,8 @@ All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` 
 2. `deliveries?rangeStart=<previous week>&rangeEnd=week` → if an item with id `week` exists and isn't `DELIVERED`, meals come from the menu selection (needs `customer_plan_id`). **`rangeStart` is exclusive** (verified live: `W47..W47` returns nothing, `W46..W47` returns W47), hence the previous week; asking for `week..week` never finds the week and silently falls through to past-deliveries, which only includes the very next box.
 3. Otherwise `past-deliveries?from=week`, matching the entry whose `week` equals the requested one.
 4. Recipe IDs are de-duplicated (order kept) and fetched with `get_recipes()`. No box that week → `[]`.
+
+`"next"` looks for the delivery first (`_find_next_delivery`) and only needs `customer_plan_id` when one exists, so nothing scheduled returns `[]` even for an account without plan ids. Every deliveries range query must start one week early: `_get_delivery_items` and `_meals_for_week` both do, because `rangeStart` is exclusive.
 
 ### Week strings
 

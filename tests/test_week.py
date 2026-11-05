@@ -212,6 +212,39 @@ async def test_next_with_nothing_scheduled_returns_empty(client) -> None:
         assert await client.get_recipes_for_week("next", subscription_id=1, customer_plan_id="p") == []
 
 
+async def test_next_with_nothing_scheduled_needs_no_plan_id(client) -> None:
+    with aioresponses() as m:
+        m.get(DELIVERIES, payload={"items": [{"id": "2026-W45", "status": "DELIVERED"}]})
+        assert await client.get_recipes_for_week("next", subscription_id=1, customer_plan_id="") == []
+
+
+async def test_next_needs_plan_id_when_a_delivery_exists(client) -> None:
+    item = {"id": "2026-W46", "status": "RUNNING", "cutoffDate": "2026-11-07T23:59:00+00:00",
+            "deliveryDate": "2026-11-08T08:00:00+00:00", "product": {}, "deliveryOption": {}}
+    with aioresponses() as m:
+        m.get(DELIVERIES, payload={"items": [item]})
+        with pytest.raises(ValueError, match="customer_plan_id"):
+            await client.get_recipes_for_week("next", subscription_id=1, customer_plan_id="")
+
+
+async def test_next_includes_a_box_for_the_current_week(client) -> None:
+    """rangeStart is exclusive, so a current-week delivery needs the previous week as start."""
+    iso = datetime.now().isocalendar()
+    week = f"{iso.year}-W{iso.week:02d}"
+    later = (datetime.now(tz=UTC) + timedelta(days=1)).isoformat()
+    item = {"id": week, "status": "RUNNING", "cutoffDate": later, "deliveryDate": later,
+            "product": {"handle": "sku", "specs": {"size": 2}}, "deliveryOption": {"handle": "o"}}
+    menu = {"meals": [{"recipe": {"id": "c", "name": "C"}, "selection": {"quantity": 1}}]}
+    with aioresponses() as m:
+        m.get(DELIVERIES, callback=deliveries_like_api([item]))
+        m.get(MENU, payload=menu)
+        m.get(recipe_url("c"), payload=recipe_payload("c"))
+        recipes = await client.get_recipes_for_week("next", subscription_id=1, customer_plan_id="plan")
+        (url, _), = _requests(m, MENU)
+        assert url.query["week"] == week
+    assert [r.id for r in recipes] == ["c"]
+
+
 async def test_ids_default_from_customer_info(client) -> None:
     info = {
         "id": "c", "uuid": "u", "firstName": "F", "lastName": "L", "email": "e",

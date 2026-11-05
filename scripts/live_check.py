@@ -507,10 +507,16 @@ async def run(args: argparse.Namespace) -> int:
                 )
                 checked += 1
             if nxt is not None:
-                # A datetime inside the next delivery's week must give the same box.
-                await for_week(nxt.delivery_date, "next-date")
+                # HelloFresh week ids are cooking weeks: the box delivered Sun 8 Nov 2026
+                # is '2026-W46' although 8 Nov is in ISO week 45. So use a mid-week date
+                # taken from the week id, not the delivery date.
+                m = re.fullmatch(r"(\d{4})-W(\d{2})", nxt.week)
+                r.expect(m, f"unexpected week id {nxt.week!r}")
+                midweek = date.fromisocalendar(int(m[1]), int(m[2]), 3)
+                await for_week(midweek, "next-date")
                 same_recipes(
-                    f"date {nxt.delivery_date:%Y-%m-%d}", week_ids["next-date"], "'next'", week_ids.get("next")
+                    f"date {midweek} (Wednesday of {nxt.week})",
+                    week_ids["next-date"], "'next'", week_ids.get("next"),
                 )
                 checked += 1
             await for_week(date.today(), "today")

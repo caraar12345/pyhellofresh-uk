@@ -422,6 +422,11 @@ class HelloFreshClient:
         * ``"next"`` / ``"upcoming"``: the next scheduled box, whether or not
           its cutoff has passed (as ``get_upcoming_delivery``).
 
+        Week ids are HelloFresh's *cooking* weeks, not delivery weeks: the box
+        delivered on Sunday 8 Nov 2026 is ``"2026-W46"``, although 8 Nov is in
+        ISO week 45. A date selects the box whose week id equals the date's ISO
+        week, so pass a date in the week you cook, not the delivery date.
+
         Delivered weeks are read from past deliveries; weeks not yet delivered
         use the meals currently selected on the menu. Returns an empty list
         when there is no box that week (skipped, paused, or out of range).

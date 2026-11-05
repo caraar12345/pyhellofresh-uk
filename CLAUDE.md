@@ -96,6 +96,8 @@ All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` 
 
 ISO week format: `"YYYY-WWW"` e.g. `"2026-W15"`. Built with `f"{iso.year}-W{iso.week:02d}"`.
 
+HelloFresh's week ids are *cooking* weeks, not delivery weeks. Verified live: the box with `deliveryDate` Sunday 8 Nov 2026 has id `2026-W46`, but 8 Nov is in ISO week 45. So `get_recipes_for_week(date)` maps a date to the box whose id equals that date's ISO week: pass a date in the cooking week, not the delivery date. Meal order within a box is also not stable between API calls, so compare boxes as sets of recipe IDs.
+
 ## Dependencies
 
 - `aiohttp>=3.9.0` — async HTTP

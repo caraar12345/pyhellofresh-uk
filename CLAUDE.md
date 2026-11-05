@@ -30,12 +30,12 @@ uv build          # build wheel + sdist into dist/
 `uv run pytest` only uses mocked responses. Before a release, run the read-only live check with a real account:
 
 ```bash
-HELLOFRESH_EMAIL=... HELLOFRESH_PASSWORD=... uv run python scripts/live_check.py -v
+HELLOFRESH_EMAIL=... HELLOFRESH_PASSWORD=... ./scripts/live_check.py -v   # shebang: env -S uv run --script; run from the repo root
 ```
 
 Optional: `HELLOFRESH_FLARESOLVERR_URL`, `--token-cache FILE` (reuses/saves the token, `0600`, avoids a fresh login each run), `--recipe-id ID`, `--dump DIR` (raw responses, contains account data; useful for new fixtures), `--debug`.
 
-It covers login, Auth0 refresh (forced by back-dating the token), customer info, last/upcoming/next-changeable deliveries, `get_recipe` (yields, nutrition, allergens, durations), step Markdown (no raw HTML), every `get_recipes_for_week` form and that the aliases agree with the delivery methods. It compares recipe/step keys against `KNOWN_RECIPE_KEYS`/`KNOWN_STEP_KEYS` and warns on drift; update those sets when HelloFresh adds fields. It never writes anything (no selections, skips or subscription changes). Exit code: 0 if no FAIL (WARN allowed), 1 on any FAIL, 2 for missing credentials.
+It covers login, Auth0 refresh (forced by back-dating the token), customer info, last/upcoming/next-changeable deliveries, `get_recipe` (yields, nutrition, allergens, durations), step Markdown (no raw HTML), every `get_recipes_for_week` form and that the aliases agree with the delivery methods (compared as sets of recipe IDs: a pure reordering is a WARN, a differing recipe is a FAIL). If the Auth0 refresh falls back to a full login, it repeats the refresh once and prints Auth0's HTTP status and `error`/`error_description` (never tokens). It compares recipe/step keys against `KNOWN_RECIPE_KEYS`/`KNOWN_STEP_KEYS` and warns on drift; update those sets when HelloFresh adds fields. It never writes anything (no selections, skips or subscription changes). Exit code: 0 if no FAIL (WARN allowed), 1 on any FAIL, 2 for missing credentials.
 
 ## Publishing
 

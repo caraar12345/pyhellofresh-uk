@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run --script
 """Run read-only checks against the live HelloFresh UK API.
 
 Unit tests use mocked responses. This script makes real requests with your
@@ -5,14 +6,14 @@ account, to confirm the library still matches what HelloFresh actually
 returns. It only ever reads data: it never changes selections, skips weeks or
 touches your subscription.
 
-Usage (from the repo root, so the local package is used):
+Usage (from the repo root, so uv uses the project environment with the local package):
 
     export HELLOFRESH_EMAIL=you@example.com
     export HELLOFRESH_PASSWORD=...
     export HELLOFRESH_FLARESOLVERR_URL=http://flaresolverr:8191   # optional
-    uv run python scripts/live_check.py
-    uv run python scripts/live_check.py --token-cache ~/.cache/hellofresh-token.json
-    uv run python scripts/live_check.py --recipe-id 6a98470271b095d5fbaf833f --dump /tmp/hf -v
+    ./scripts/live_check.py
+    ./scripts/live_check.py --token-cache ~/.cache/hellofresh-token.json
+    ./scripts/live_check.py --recipe-id 6a98470271b095d5fbaf833f --dump /tmp/hf -v
 
 Exit code is 0 when nothing failed (warnings allowed), 1 otherwise.
 """
@@ -42,7 +43,7 @@ from pyhellofresh import (
     UpcomingDelivery,
     WeeklyDelivery,
 )
-from pyhellofresh.client import _parse_recipe
+from pyhellofresh.client import _AUTH0_CLIENT_ID, _AUTH0_URL, _parse_recipe
 
 FALLBACK_RECIPE_ID = "6a98470271b095d5fbaf833f"
 
@@ -252,8 +253,30 @@ async def run(args: argparse.Namespace) -> int:
         plan_id = info.customer_plan_ids[0] if info.customer_plan_ids else ""
 
         # -- token refresh ---------------------------------------------
+        async def probe_auth0(refresh_token: str) -> None:
+            """Repeat the failed refresh and report why Auth0 said no (never prints tokens)."""
+            try:
+                async with client._ensure_session().post(
+                    f"{_AUTH0_URL}/oauth/token",
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": _AUTH0_CLIENT_ID,
+                    },
+                ) as resp:
+                    body = await resp.json(content_type=None)
+                    detail = (
+                        {k: body[k] for k in ("error", "error_description") if k in body}
+                        if isinstance(body, dict)
+                        else {}
+                    )
+                    r.info(f"Auth0 /oauth/token answered HTTP {resp.status} {detail or ''}".rstrip())
+            except Exception as err:  # noqa: BLE001
+                r.info(f"Auth0 probe failed: {type(err).__name__}: {err}")
+
         async def refresh() -> None:
             assert client._token is not None
+            old_refresh_token = client._token.refresh_token
             refreshed = False
             original = client._refresh_token
 
@@ -278,6 +301,7 @@ async def run(args: argparse.Namespace) -> int:
                 r.info("Auth0 refresh succeeded")
             else:
                 r.warn("Auth0 refresh failed; client fell back to email/password login")
+                await probe_auth0(old_refresh_token)
 
         await r.check("token refresh (Auth0)", refresh)
 
@@ -425,6 +449,24 @@ async def run(args: argparse.Namespace) -> int:
         # -- get_recipes_for_week -------------------------------------
         week_ids: dict[str, list[str]] = {}
 
+        def same_recipes(a_name: str, a: list[str] | None, b_name: str, b: list[str] | None) -> None:
+            """Fail if two sources disagree on which recipes are in the box.
+
+            Order is ignored (a box is a set of recipes); a pure reordering is
+            only a warning, since HelloFresh may not return meals in a stable order.
+            """
+            if a is None or b is None:
+                r.warn(f"not compared: no result for {a_name if a is None else b_name}")
+                return
+            if sorted(a) != sorted(b):
+                raise CheckFailed(
+                    f"{a_name} ({len(a)}) != {b_name} ({len(b)}): "
+                    f"only in {a_name}: {sorted(set(a) - set(b))}, "
+                    f"only in {b_name}: {sorted(set(b) - set(a))}"
+                )
+            if a != b:
+                r.warn(f"{a_name} and {b_name} have the same recipes in a different order")
+
         async def for_week(when: Any, label: str) -> None:
             recipes = await client.get_recipes_for_week(
                 when, subscription_id=sub_id, customer_plan_id=plan_id
@@ -438,12 +480,12 @@ async def run(args: argparse.Namespace) -> int:
         async def keyword_consistency() -> None:
             if not week_ids:
                 raise Skip("week checks failed")
-            r.expect(week_ids.get("last") == week_ids.get("latest"), "'last' != 'latest'")
-            r.expect(week_ids.get("next") == week_ids.get("upcoming"), "'next' != 'upcoming'")
+            same_recipes("'last'", week_ids.get("last"), "'latest'", week_ids.get("latest"))
+            same_recipes("'next'", week_ids.get("next"), "'upcoming'", week_ids.get("upcoming"))
             if last is not None:
-                r.expect(week_ids.get("last") == _ids(last.meals), "'last' differs from get_last_delivery")
+                same_recipes("'last'", week_ids.get("last"), "get_last_delivery", _ids(last.meals))
             if nxt is not None:
-                r.expect(week_ids.get("next") == _ids(nxt.meals), "'next' differs from get_upcoming_delivery")
+                same_recipes("'next'", week_ids.get("next"), "get_upcoming_delivery", _ids(nxt.meals))
 
         await r.check("keyword aliases agree with delivery methods", keyword_consistency)
 
@@ -451,14 +493,16 @@ async def run(args: argparse.Namespace) -> int:
             checked = 0
             if last is not None:
                 await for_week(last.week, "last-week-string")
-                r.expect(week_ids["last-week-string"] == week_ids.get("last"),
-                         f"{last.week!r} differs from 'last'")
+                same_recipes(
+                    repr(last.week), week_ids["last-week-string"], "'last'", week_ids.get("last")
+                )
                 checked += 1
             if nxt is not None:
                 # A datetime inside the next delivery's week must give the same box.
                 await for_week(nxt.delivery_date, "next-date")
-                r.expect(week_ids["next-date"] == week_ids.get("next"),
-                         f"date {nxt.delivery_date:%Y-%m-%d} differs from 'next'")
+                same_recipes(
+                    f"date {nxt.delivery_date:%Y-%m-%d}", week_ids["next-date"], "'next'", week_ids.get("next")
+                )
                 checked += 1
             await for_week(date.today(), "today")
             if not checked:

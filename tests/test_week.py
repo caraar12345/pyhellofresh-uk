@@ -52,7 +52,7 @@ def test_to_iso_week(when, expected) -> None:
     assert _to_iso_week(when) == expected
 
 
-@pytest.mark.parametrize("bad", ["2026-45", "latest", "2026-W5"])
+@pytest.mark.parametrize("bad", ["2026-45", "LAST", "previous", "2026-W5"])
 def test_to_iso_week_rejects_bad_strings(bad) -> None:
     with pytest.raises(ValueError):
         _to_iso_week(bad)
@@ -131,7 +131,8 @@ async def test_week_without_box_returns_empty(client) -> None:
         ) == []
 
 
-async def test_last_uses_last_delivery_and_dedupes(client) -> None:
+@pytest.mark.parametrize("keyword", ["last", "latest"])
+async def test_last_uses_last_delivery_and_dedupes(client, keyword) -> None:
     with aioresponses() as m:
         m.get(
             PAST,
@@ -143,13 +144,14 @@ async def test_last_uses_last_delivery_and_dedupes(client) -> None:
             },
         )
         m.get(recipe_url("a"), payload=recipe_payload("a"))
-        recipes = await client.get_recipes_for_week("last", subscription_id=1)
+        recipes = await client.get_recipes_for_week(keyword, subscription_id=1)
         assert not _requests(m, INFO)  # no customer lookup needed
         assert not _requests(m, DELIVERIES)
     assert [r.id for r in recipes] == ["a"]
 
 
-async def test_next_uses_upcoming_delivery(client) -> None:
+@pytest.mark.parametrize("keyword", ["next", "upcoming"])
+async def test_next_uses_upcoming_delivery(client, keyword) -> None:
     items = [
         {"id": "2026-W45", "status": "DELIVERED"},
         {
@@ -166,7 +168,7 @@ async def test_next_uses_upcoming_delivery(client) -> None:
         m.get(DELIVERIES, payload={"items": items})
         m.get(MENU, payload=menu)
         m.get(recipe_url("n"), payload=recipe_payload("n"))
-        recipes = await client.get_recipes_for_week("next", subscription_id=1, customer_plan_id="plan")
+        recipes = await client.get_recipes_for_week(keyword, subscription_id=1, customer_plan_id="plan")
         (url, _), = _requests(m, MENU)
         assert url.query["week"] == "2026-W46"
     assert [r.id for r in recipes] == ["n"]

@@ -39,7 +39,7 @@ _AUTH0_CLIENT_ID = "B1n0Q24hv7e4AHc7yG1WwQyuMvpCAIya"
 _COUNTRY = "GB"
 _LOCALE = "en-GB"
 _TOKEN_EXPIRY_BUFFER = timedelta(seconds=60)
-_WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
+_WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})$")
 _MAX_CONCURRENT_RECIPES = 4
 _LAST_KEYWORDS = frozenset({"last", "latest"})
 _NEXT_KEYWORDS = frozenset({"next", "upcoming"})
@@ -470,7 +470,9 @@ class HelloFreshClient:
         """Meals in the box for ``week``: menu selection if upcoming, else past deliveries."""
         data = await self._request(
             "/gw/api/customers/me/deliveries",
-            self._std_params(rangeStart=week, rangeEnd=week),
+            # rangeStart is exclusive (verified live: W47..W47 is empty, W46..W47
+            # returns W47), so start from the week before to include ``week``.
+            self._std_params(rangeStart=_previous_iso_week(week), rangeEnd=week),
         )
         item = next((i for i in data.get("items", []) if i.get("id") == week), None)
         if item is not None and item.get("status") != "DELIVERED":
@@ -571,6 +573,15 @@ def _to_iso_week(when: date | datetime | str) -> str:
         iso = when.isocalendar()
         return f"{iso.year}-W{iso.week:02d}"
     raise TypeError(f"Unsupported type for week: {type(when).__name__}")
+
+
+def _previous_iso_week(week: str) -> str:
+    """The ISO week before ``week``, e.g. ``"2026-W01"`` -> ``"2025-W52"``."""
+    match = _WEEK_RE.match(week)
+    if match is None:
+        raise ValueError(f"Expected an ISO week like '2026-W45'; got {week!r}")
+    monday = date.fromisocalendar(int(match[1]), int(match[2]), 1)
+    return _to_iso_week(monday - timedelta(days=7))
 
 
 def _find_next_delivery(items: list[dict]) -> dict | None:

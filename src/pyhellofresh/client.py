@@ -2,14 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+import re
+from html import escape
+from datetime import UTC, date, datetime, timedelta
+from typing import Literal
+from urllib.parse import quote
 
 import aiohttp
 from yarl import URL
 
 from .exceptions import ApiError, AuthenticationError, CloudflareBlockError
-from .models import AuthToken, CustomerInfo, Meal, UpcomingDelivery, WeeklyDelivery
+from .markdown import html_to_markdown
+from .models import (
+    Allergen,
+    AuthToken,
+    Cuisine,
+    CustomerInfo,
+    Ingredient,
+    IngredientAmount,
+    Meal,
+    NutritionValue,
+    Recipe,
+    RecipeStep,
+    Tag,
+    UpcomingDelivery,
+    Utensil,
+    WeeklyDelivery,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,6 +40,10 @@ _AUTH0_CLIENT_ID = "B1n0Q24hv7e4AHc7yG1WwQyuMvpCAIya"
 _COUNTRY = "GB"
 _LOCALE = "en-GB"
 _TOKEN_EXPIRY_BUFFER = timedelta(seconds=60)
+_WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})$")
+_MAX_CONCURRENT_RECIPES = 4
+_LAST_KEYWORDS = frozenset({"last", "latest"})
+_NEXT_KEYWORDS = frozenset({"next", "upcoming"})
 _PDF_URL_TEMPLATE = f"{_BASE_URL}/recipecards/card/{{recipe_id}}-en-GB.pdf"
 
 _USER_AGENT = (
@@ -74,6 +99,8 @@ class HelloFreshClient:
         self._flaresolverr_url = flaresolverr_url.rstrip("/") if flaresolverr_url else None
         self._session: aiohttp.ClientSession | None = None
         self._token: AuthToken | None = None
+        self._token_lock = asyncio.Lock()
+        self._recipe_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_RECIPES)
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -211,6 +238,12 @@ class HelloFreshClient:
         return token
 
     async def _ensure_token(self) -> str:
+        # Serialise so concurrent requests (e.g. get_recipes) share one
+        # authenticate/refresh instead of each starting their own.
+        async with self._token_lock:
+            return await self._ensure_token_locked()
+
+    async def _ensure_token_locked(self) -> str:
         if self._token is None:
             await self.authenticate()
             assert self._token is not None
@@ -357,15 +390,121 @@ class HelloFreshClient:
             return None
         return await self._build_upcoming_delivery(next_item, subscription_id, customer_plan_id)
 
+    async def get_recipe(self, recipe_id: str) -> Recipe:
+        """Return full details for a recipe: ingredients, quantities per
+        serving count, nutrition, method steps, allergens, utensils and tags.
+
+        ``recipe_id`` is the ``Meal.id`` returned by the delivery methods.
+        """
+        async with self._recipe_semaphore:
+            data = await self._request(
+                f"/gw/recipes/recipes/{quote(recipe_id, safe='')}", self._std_params()
+            )
+        return _parse_recipe(data)
+
+    async def get_recipes(self, recipe_ids: list[str]) -> list[Recipe]:
+        """Fetch several recipes concurrently (at most 4 in flight), preserving input order."""
+        return list(await asyncio.gather(*(self.get_recipe(r) for r in recipe_ids)))
+
+    async def get_recipes_for_week(
+        self,
+        when: date | datetime | Literal["last", "latest", "next", "upcoming"] | str,
+        *,
+        subscription_id: int | None = None,
+        customer_plan_id: str | None = None,
+    ) -> list[Recipe]:
+        """Return full recipes for the meals in your box for a given week.
+
+        ``when`` is any ``date``/``datetime`` (its ISO week is used), an ISO
+        week string such as ``"2026-W45"``, or:
+
+        * ``"last"`` / ``"latest"``: the most recently delivered box (as
+          ``get_last_delivery``).
+        * ``"next"`` / ``"upcoming"``: the next scheduled box, whether or not
+          its cutoff has passed (as ``get_upcoming_delivery``).
+
+        Delivered weeks are read from past deliveries; weeks not yet delivered
+        use the meals currently selected on the menu. Returns an empty list
+        when there is no box that week (skipped, paused, or out of range).
+
+        ``subscription_id`` and ``customer_plan_id`` default to the account's
+        active subscription and first customer plan, looked up with one extra
+        call when not given.
+        """
+        # customer_plan_id is only needed for weeks not yet delivered (menu API).
+        is_last = isinstance(when, str) and when in _LAST_KEYWORDS
+        is_next = isinstance(when, str) and when in _NEXT_KEYWORDS
+        if subscription_id is None or (customer_plan_id is None and not is_last):
+            info = await self.get_customer_info()
+            if subscription_id is None:
+                subscription_id = info.active_subscription_id
+            if customer_plan_id is None:
+                customer_plan_id = info.customer_plan_ids[0] if info.customer_plan_ids else ""
+
+        if is_last:
+            last = await self.get_last_delivery(subscription_id)
+            meals = last.meals if last else []
+        elif is_next:
+            # Look for a delivery first: the plan id is only needed for the menu lookup,
+            # so "nothing scheduled" returns [] even for an account without plan ids.
+            item = _find_next_delivery(await self._get_delivery_items())
+            if item is None:
+                meals = []
+            else:
+                if not customer_plan_id:
+                    raise ValueError(f"customer_plan_id is required for {when!r}")
+                upcoming = await self._build_upcoming_delivery(
+                    item, subscription_id, customer_plan_id
+                )
+                meals = upcoming.meals
+        else:
+            week = _to_iso_week(when)
+            meals = await self._meals_for_week(week, subscription_id, customer_plan_id)
+
+        recipe_ids = list(dict.fromkeys(m.id for m in meals))
+        return await self.get_recipes(recipe_ids)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _meals_for_week(
+        self, week: str, subscription_id: int, customer_plan_id: str
+    ) -> list[Meal]:
+        """Meals in the box for ``week``: menu selection if upcoming, else past deliveries."""
+        data = await self._request(
+            "/gw/api/customers/me/deliveries",
+            # rangeStart is exclusive (verified live: W47..W47 is empty, W46..W47
+            # returns W47), so start from the week before to include ``week``.
+            self._std_params(rangeStart=_previous_iso_week(week), rangeEnd=week),
+        )
+        item = next((i for i in data.get("items", []) if i.get("id") == week), None)
+        if item is not None and item.get("status") != "DELIVERED":
+            if not customer_plan_id:
+                raise ValueError("customer_plan_id is required for weeks not yet delivered")
+            upcoming = await self._build_upcoming_delivery(item, subscription_id, customer_plan_id)
+            return upcoming.meals
+
+        past = await self._request(
+            "/gw/my-deliveries/past-deliveries",
+            self._std_params(**{
+                "from": week,
+                "rating-scale": "5",
+                "subscription": str(subscription_id),
+            }),
+        )
+        for entry in past.get("weeks", []):
+            if entry.get("week") == week:
+                return _parse_meals(entry.get("meals", []))
+        return []
+
 
     async def _get_delivery_items(self) -> list[dict]:
         """Fetch raw delivery items from current week through 8 weeks ahead."""
         now = datetime.now()
         iso = now.isocalendar()
-        range_start = f"{iso.year}-W{iso.week:02d}"
+        # rangeStart is exclusive, so start from the previous week to include this one.
+        range_start = _previous_iso_week(f"{iso.year}-W{iso.week:02d}")
         range_end_dt = now + timedelta(weeks=8)
         range_end_iso = range_end_dt.isocalendar()
         range_end = f"{range_end_iso.year}-W{range_end_iso.week:02d}"
@@ -427,6 +566,39 @@ class HelloFreshClient:
 # Helpers
 # ------------------------------------------------------------------
 
+def _to_iso_week(when: date | datetime | str) -> str:
+    """Normalise a date, datetime or ``"YYYY-Www"`` string to an ISO week string."""
+    if isinstance(when, str):
+        if _WEEK_RE.match(when):
+            return when
+        raise ValueError(
+            f"Expected a date, datetime, ISO week like '2026-W45', 'last'/'latest' or 'next'/'upcoming'; got {when!r}"
+        )
+    if isinstance(when, date):  # datetime is a subclass of date
+        iso = when.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    raise TypeError(f"Unsupported type for week: {type(when).__name__}")
+
+
+def _plain_to_markdown(text: str | None) -> str:
+    """Plain-text step instructions as safe Markdown, one paragraph per line.
+
+    Used when a step has no usable HTML. The text is HTML-escaped first so that
+    ``html_to_markdown`` treats it purely as text and escapes Markdown characters.
+    """
+    paragraphs = (f"<p>{escape(line)}</p>" for line in (text or "").splitlines() if line.strip())
+    return html_to_markdown("".join(paragraphs))
+
+
+def _previous_iso_week(week: str) -> str:
+    """The ISO week before ``week``, e.g. ``"2026-W01"`` -> ``"2025-W52"``."""
+    match = _WEEK_RE.match(week)
+    if match is None:
+        raise ValueError(f"Expected an ISO week like '2026-W45'; got {week!r}")
+    monday = date.fromisocalendar(int(match[1]), int(match[2]), 1)
+    return _to_iso_week(monday - timedelta(days=7))
+
+
 def _find_next_delivery(items: list[dict]) -> dict | None:
     """Return the earliest non-delivered delivery, or None."""
     for item in items:
@@ -482,4 +654,126 @@ def _parse_meal_from_menu(item: dict) -> Meal:
         prep_time=r.get("prepTime"),
         total_time=r.get("totalTime"),
         category=r.get("category"),
+    )
+
+
+def _parse_recipe(data: dict) -> Recipe:
+    utensils = [
+        Utensil(id=u["id"], name=u.get("name", ""), type=u.get("type", ""))
+        for u in data.get("utensils") or []
+        if "id" in u
+    ]
+    utensils_by_id = {u.id: u for u in utensils}
+
+    ingredients = [
+        Ingredient(
+            id=i["id"],
+            name=i.get("name", ""),
+            slug=i.get("slug", ""),
+            image_url=i.get("imageLink"),
+            shipped=i.get("shipped", True),
+            allergens=list(i.get("allergens") or []),
+            family=(i.get("family") or {}).get("name"),
+        )
+        for i in data.get("ingredients") or []
+        if "id" in i
+    ]
+    ingredients_by_id = {i.id: i for i in ingredients}
+
+    yields: dict[int, list[IngredientAmount]] = {}
+    for y in data.get("yields") or []:
+        servings = y.get("yields")
+        if servings is None:
+            continue
+        yields[int(servings)] = [
+            IngredientAmount(
+                ingredient=ingredients_by_id[a["id"]],
+                amount=a.get("amount"),
+                unit=a.get("unit"),
+            )
+            for a in y.get("ingredients") or []
+            if a.get("id") in ingredients_by_id
+        ]
+
+    steps = []
+    for st in data.get("steps") or []:
+        images = st.get("images") or []
+        steps.append(
+            RecipeStep(
+                index=st.get("index", len(steps) + 1),
+                instructions=st.get("instructions") or "",
+                instructions_html=st.get("instructionsHTML") or "",
+                instructions_markdown=html_to_markdown(st.get("instructionsHTML"))
+                or _plain_to_markdown(st.get("instructions")),
+                image_urls=[img["link"] for img in images if img.get("link")],
+                image_caption=next(
+                    (img["caption"] for img in images if img.get("caption")), None
+                ),
+                utensils=[
+                    utensils_by_id[u] for u in st.get("utensils") or [] if u in utensils_by_id
+                ],
+            )
+        )
+
+    return Recipe(
+        id=data["id"],
+        uuid=data.get("uuid", ""),
+        name=data.get("name", ""),
+        slug=data.get("slug", ""),
+        headline=data.get("headline") or "",
+        description=data.get("descriptionMarkdown") or data.get("description") or "",
+        description_html=data.get("descriptionHTML") or "",
+        image_url=data.get("imageLink"),
+        website_url=data.get("websiteUrl") or "",
+        card_url=data.get("cardLink"),
+        prep_time=data.get("prepTime"),
+        total_time=data.get("totalTime"),
+        difficulty=data.get("difficulty"),
+        average_rating=data.get("averageRating"),
+        ratings_count=data.get("ratingsCount") or 0,
+        favorites_count=data.get("favoritesCount") or 0,
+        serving_size_grams=data.get("servingSize"),
+        unique_recipe_code=data.get("uniqueRecipeCode"),
+        allergens=[
+            Allergen(
+                id=a["id"],
+                name=a.get("name", ""),
+                slug=a.get("slug", ""),
+                icon_url=a.get("iconLink"),
+                traces_of=a.get("tracesOf", False),
+                triggers_traces_of=a.get("triggersTracesOf", False),
+            )
+            for a in data.get("allergens") or []
+            if "id" in a
+        ],
+        ingredients=ingredients,
+        yields=yields,
+        nutrition=[
+            NutritionValue(name=n["name"], amount=n["amount"], unit=n.get("unit", ""))
+            for n in data.get("nutrition") or []
+            if "name" in n and n.get("amount") is not None
+        ],
+        steps=steps,
+        utensils=utensils,
+        tags=[
+            Tag(
+                id=t["id"],
+                name=t.get("name", ""),
+                slug=t.get("slug", ""),
+                type=t.get("type", ""),
+                display_label=t.get("displayLabel", False),
+            )
+            for t in data.get("tags") or []
+            if "id" in t
+        ],
+        cuisines=[
+            Cuisine(
+                id=c["id"],
+                name=c.get("name", ""),
+                slug=c.get("slug", ""),
+                icon_url=c.get("iconLink"),
+            )
+            for c in data.get("cuisines") or []
+            if "id" in c
+        ],
     )

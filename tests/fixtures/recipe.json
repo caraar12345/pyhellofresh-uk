@@ -1,0 +1,23 @@
+{"active":true,"allergens":[{"id":"57962a07b7e8697d4b3052f7","name":"Fish","type":"fish","slug":"fish","iconLink":"https://d3hvwccx09j84u.cloudfront.net/0,0/allergens/57962a07b7e8697d4b3052f7-feb8e168.png","triggersTracesOf":false,"tracesOf":false},{"id":"60368d89cdbdf450236ad8cd","name":"Wheat","type":"wheat","slug":"wheat","iconPath":null,"triggersTracesOf":false,"tracesOf":false}],
+"averageRating":3.6,"cardLink":"https://www.hellofresh.co.uk/recipecards/card/88ef47eb-268a-4c76-9eeb-39fc6f734622-en-GB-1793104841-auto.pdf","category":null,"country":"GB",
+"cuisines":[{"id":"57ebbc17b7e8697d4b3053a5","type":"asian","name":"Asian","slug":"asian","iconLink":"https://d3hvwccx09j84u.cloudfront.net/0,0/cuisines/57ebbc17b7e8697d4b3053a5-0483bf75.jpg"}],
+"description":"Salmon is a delicate and flavoursome fish.","descriptionHTML":"<p>Salmon is a delicate and flavoursome fish.</p>","descriptionMarkdown":"Salmon is a delicate and flavoursome fish.",
+"difficulty":1,"favoritesCount":5,"headline":"with Garlic Rice and Soy Stir-Fried Mushrooms & Pea Pods","id":"6a98470271b095d5fbaf833f",
+"imageLink":"https://d3hvwccx09j84u.cloudfront.net/0,0/image/HF_Y24_R46_W43_UK_R23421-3_Main_3_high-d5d5a574.jpg",
+"ingredients":[
+{"id":"62fcaa09bd9a2478e193effe","uuid":"beb18521-a236-4c7e-b853-a4665d377722","name":"Salmon Fillets","type":"skin-on-salmon-fillet","slug":"salmon-fillets","country":"GB","imageLink":"https://d3hvwccx09j84u.cloudfront.net/200,200/ingredient/62fcaa09bd9a2478e193effe-f324730f.png","shipped":true,"allergens":["57962a07b7e8697d4b3052f7"],"family":{"id":"6299e0f4f7cd25bc1c024384","name":"none","slug":"none","type":"none"}},
+{"id":"680b9d014a6668c89d92df5a","uuid":"0eae0198-9f27-5e24-97d4-45b44e38d5dd","name":"Soy Sauce","type":"soy sauce","slug":"soy-sauce","country":"GB","imageLink":"https://d3hvwccx09j84u.cloudfront.net/200,200/ingredient/680b9d014a6668c89d92df5a-144b6006.png","shipped":true,"allergens":["60368d89cdbdf450236ad8cd"],"family":{"id":"58877cf3ed71a76e9c03fc30","name":"sauce","slug":"sauce","type":"soy-sauce"}},
+{"id":"60c73507053f5e815cd52d5b","uuid":"cf9af936-101e-4641-90f0-347da4d0a347","name":"Butter","type":"butter-100g","slug":"butter","country":"GB","imageLink":"https://d3hvwccx09j84u.cloudfront.net/200,200/ingredient/60c73507053f5e815cd52d5b-f86ea540.png","shipped":false,"allergens":[],"family":{"id":"58877cf3ed71a76e9c03fb5b","name":"butter","slug":"butter","type":"butter"}}],
+"name":"Hot Honey Baked Salmon",
+"nutrition":[{"type":"57b42a48b7e8697d4b305304","name":"Energy (kcal)","amount":786,"unit":"kcal"},{"type":"57b42a48b7e8697d4b305309","name":"Protein","amount":29.9,"unit":"g"},{"type":"57b42a48b7e8697d4b30530b","name":"Salt","amount":1.84,"unit":"g"}],
+"prepTime":"PT30M","ratingsCount":79,"servingSize":499,"slug":"hot-honey-baked-salmon",
+"steps":[
+{"index":1,"instructions":"Preheat your oven to 220°C/200°C fan/gas mark 7.","instructionsHTML":"<p>Preheat your oven to 220°C/200°C fan/gas mark 7.</p>","ingredients":[],"utensils":["57e2674fb7e8697d4b30538c","unknown-utensil"],"timers":[],"images":[{"link":"https://d3hvwccx09j84u.cloudfront.net/0,0/6a98470271b095d5fbaf833f/step-7203ba00.jpg","path":"/6a98470271b095d5fbaf833f/step-7203ba00.jpg","caption":"Start the Garlic Rice"}],"videos":[]},
+{"index":2,"instructions":"Serve up.","instructionsHTML":"<p>Serve up.</p>","ingredients":[],"utensils":[],"timers":[],"images":[],"videos":[]}],
+"tags":[{"id":"62388d0e819bac74ed3067ef","type":"pescatarian","name":"Pescatarian","slug":"pescatarian","colorHandle":null,"preferences":["Pescatarian"],"displayLabel":true},{"id":"66cd275653ae6b9233559d4e","type":"dinner-bowls","name":"dinner-bowls","slug":"dinner-bowls","colorHandle":null,"preferences":[],"displayLabel":false}],
+"totalTime":"PT1H5M","uniqueRecipeCode":"R23421-16",
+"utensils":[{"id":"57e2674fb7e8697d4b30538c","type":"saucepan","name":"Medium Saucepan"},{"id":"636bd5d9d7cc354a94046877","type":"large-frying-pan","name":"Large Frying Pan"}],
+"uuid":"88ef47eb-268a-4c76-9eeb-39fc6f734622","websiteUrl":"https://www.hellofresh.co.uk/recipes/hot-honey-baked-salmon-6a98470271b095d5fbaf833f",
+"yields":[
+{"yields":2,"ingredients":[{"id":"62fcaa09bd9a2478e193effe","amount":200,"unit":"grams"},{"id":"680b9d014a6668c89d92df5a","amount":10,"unit":"milliliter(s)"},{"id":"60c73507053f5e815cd52d5b","amount":30,"unit":"grams"}]},
+{"yields":4,"ingredients":[{"id":"62fcaa09bd9a2478e193effe","amount":400,"unit":"grams"},{"id":"680b9d014a6668c89d92df5a","amount":20,"unit":"milliliter(s)"},{"id":"60c73507053f5e815cd52d5b","amount":60,"unit":"grams"},{"id":"not-in-ingredients","amount":1,"unit":"unit(s)"}]}]}

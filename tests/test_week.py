@@ -7,10 +7,10 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 
 from pyhellofresh import AuthToken, HelloFreshClient
-from pyhellofresh.client import _to_iso_week
+from pyhellofresh.client import _previous_iso_week, _to_iso_week
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "recipe.json").read_text())
 BASE = r"https://www\.hellofresh\.co\.uk"
@@ -18,6 +18,20 @@ DELIVERIES = re.compile(BASE + r"/gw/api/customers/me/deliveries\?.*")
 PAST = re.compile(BASE + r"/gw/my-deliveries/past-deliveries\?.*")
 MENU = re.compile(BASE + r"/gw/my-deliveries/menu\?.*")
 INFO = re.compile(BASE + r"/gw/api/customers/me/info\?.*")
+
+
+def deliveries_like_api(items: list[dict]):
+    """Mimic the real deliveries endpoint, where rangeStart is EXCLUSIVE.
+
+    Verified live: rangeStart=W47&rangeEnd=W47 returns nothing, while
+    rangeStart=W46&rangeEnd=W47 returns W47.
+    """
+
+    def callback(url, **kwargs):
+        start, end = url.query["rangeStart"], url.query["rangeEnd"]
+        return CallbackResult(payload={"items": [i for i in items if start < i["id"] <= end]})
+
+    return callback
 
 
 def recipe_url(rid: str) -> re.Pattern[str]:
@@ -52,6 +66,24 @@ def test_to_iso_week(when, expected) -> None:
     assert _to_iso_week(when) == expected
 
 
+@pytest.mark.parametrize(
+    ("week", "expected"),
+    [
+        ("2026-W46", "2026-W45"),
+        ("2026-W01", "2025-W52"),
+        ("2021-W01", "2020-W53"),  # 2020 has 53 ISO weeks
+        ("2027-W10", "2027-W09"),
+    ],
+)
+def test_previous_iso_week(week, expected) -> None:
+    assert _previous_iso_week(week) == expected
+
+
+def test_previous_iso_week_rejects_bad_strings() -> None:
+    with pytest.raises(ValueError):
+        _previous_iso_week("next")
+
+
 @pytest.mark.parametrize("bad", ["2026-45", "LAST", "previous", "2026-W5"])
 def test_to_iso_week_rejects_bad_strings(bad) -> None:
     with pytest.raises(ValueError):
@@ -64,7 +96,7 @@ def _requests(m, pattern: re.Pattern[str]) -> list:
 
 async def test_delivered_week_uses_past_deliveries(client) -> None:
     with aioresponses() as m:
-        m.get(DELIVERIES, payload={"items": [{"id": "2026-W40", "status": "DELIVERED"}]})
+        m.get(DELIVERIES, callback=deliveries_like_api([{"id": "2026-W40", "status": "DELIVERED"}]))
         m.get(
             PAST,
             payload={
@@ -82,7 +114,7 @@ async def test_delivered_week_uses_past_deliveries(client) -> None:
         )
 
         (url, _), = _requests(m, DELIVERIES)
-        assert url.query["rangeStart"] == url.query["rangeEnd"] == "2026-W40"
+        assert (url.query["rangeStart"], url.query["rangeEnd"]) == ("2026-W39", "2026-W40")
         (url, _), = _requests(m, PAST)
         assert url.query["from"] == "2026-W40"
         assert url.query["subscription"] == "1"
@@ -107,7 +139,7 @@ async def test_upcoming_week_uses_menu_selection(client) -> None:
         ]
     }
     with aioresponses() as m:
-        m.get(DELIVERIES, payload={"items": [item]})
+        m.get(DELIVERIES, callback=deliveries_like_api([item]))
         m.get(MENU, payload=menu)
         m.get(recipe_url("x"), payload=recipe_payload("x"))
         m.get(recipe_url("z"), payload=recipe_payload("z"))

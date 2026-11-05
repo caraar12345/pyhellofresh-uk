@@ -75,7 +75,7 @@ All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` 
 `get_recipes_for_week(when, *, subscription_id=None, customer_plan_id=None)`; `when` is a `date`/`datetime` (ISO week taken), a `"YYYY-Www"` string, `"last"`/`"latest"` (= `get_last_delivery`, most recently *delivered* box) or `"next"`/`"upcoming"` (= `get_upcoming_delivery`, next scheduled box regardless of cutoff). Keywords are case-sensitive; the pairs are aliases (`_LAST_KEYWORDS`/`_NEXT_KEYWORDS`).
 
 1. Missing IDs → one `get_customer_info()` call (active subscription, first plan ID; plan ID not fetched for `"last"`/`"latest"`).
-2. `deliveries?rangeStart=week&rangeEnd=week` → if an item exists and isn't `DELIVERED`, meals come from the menu selection (needs `customer_plan_id`).
+2. `deliveries?rangeStart=<previous week>&rangeEnd=week` → if an item with id `week` exists and isn't `DELIVERED`, meals come from the menu selection (needs `customer_plan_id`). **`rangeStart` is exclusive** (verified live: `W47..W47` returns nothing, `W46..W47` returns W47), hence the previous week; asking for `week..week` never finds the week and silently falls through to past-deliveries, which only includes the very next box.
 3. Otherwise `past-deliveries?from=week`, matching the entry whose `week` equals the requested one.
 4. Recipe IDs are de-duplicated (order kept) and fetched with `get_recipes()`. No box that week → `[]`.
 

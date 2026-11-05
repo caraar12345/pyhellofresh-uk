@@ -12,6 +12,7 @@ src/pyhellofresh/
   markdown.py      # html_to_markdown(): stdlib-only, allow-listed HTML → CommonMark for recipe text
   exceptions.py    # HelloFreshError, AuthenticationError, CloudflareBlockError, ApiError
 tests/             # pytest + aioresponses; fixtures/ holds trimmed real API responses
+scripts/live_check.py  # read-only checks against the real API with your account (see below)
 pyproject.toml     # uv project, build backend: hatchling
 .github/workflows/publish.yml  # Publishes to PyPI on GitHub release (OIDC trusted publisher)
 ```
@@ -23,6 +24,18 @@ uv sync           # install deps + dev deps
 uv run pytest     # run tests
 uv build          # build wheel + sdist into dist/
 ```
+
+### Live API check
+
+`uv run pytest` only uses mocked responses. Before a release, run the read-only live check with a real account:
+
+```bash
+HELLOFRESH_EMAIL=... HELLOFRESH_PASSWORD=... uv run python scripts/live_check.py -v
+```
+
+Optional: `HELLOFRESH_FLARESOLVERR_URL`, `--token-cache FILE` (reuses/saves the token, `0600`, avoids a fresh login each run), `--recipe-id ID`, `--dump DIR` (raw responses, contains account data; useful for new fixtures), `--debug`.
+
+It covers login, Auth0 refresh (forced by back-dating the token), customer info, last/upcoming/next-changeable deliveries, `get_recipe` (yields, nutrition, allergens, durations), step Markdown (no raw HTML), every `get_recipes_for_week` form and that the aliases agree with the delivery methods. It compares recipe/step keys against `KNOWN_RECIPE_KEYS`/`KNOWN_STEP_KEYS` and warns on drift; update those sets when HelloFresh adds fields. It never writes anything (no selections, skips or subscription changes). Exit code: 0 if no FAIL (WARN allowed), 1 on any FAIL, 2 for missing credentials.
 
 ## Publishing
 

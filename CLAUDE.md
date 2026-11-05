@@ -12,6 +12,7 @@ src/pyhellofresh/
   markdown.py      # html_to_markdown(): stdlib-only, allow-listed HTML → CommonMark for recipe text
   exceptions.py    # HelloFreshError, AuthenticationError, CloudflareBlockError, ApiError
 tests/             # pytest + aioresponses; fixtures/ holds trimmed real API responses
+scripts/live_check.py  # read-only checks against the real API with your account (see below)
 pyproject.toml     # uv project, build backend: hatchling
 .github/workflows/publish.yml  # Publishes to PyPI on GitHub release (OIDC trusted publisher)
 ```
@@ -23,6 +24,18 @@ uv sync           # install deps + dev deps
 uv run pytest     # run tests
 uv build          # build wheel + sdist into dist/
 ```
+
+### Live API check
+
+`uv run pytest` only uses mocked responses. Before a release, run the read-only live check with a real account:
+
+```bash
+HELLOFRESH_EMAIL=... HELLOFRESH_PASSWORD=... ./scripts/live_check.py -v   # shebang: env -S uv run --script; run from the repo root
+```
+
+Optional: `HELLOFRESH_FLARESOLVERR_URL`, `--token-cache FILE` (reuses/saves the token, `0600`; the access token lasts ~30 min), `--skip-refresh-check` (the forced Auth0 refresh falls back to a full login while AARON-283 is open, so use this with a cache to make no login at all), `--recipe-id ID`, `--dump DIR` (raw responses, contains account data; useful for new fixtures), `--debug`.
+
+It covers login, Auth0 refresh (forced by back-dating the token), customer info, last/upcoming/next-changeable deliveries, `get_recipe` (yields, nutrition, allergens, durations), step Markdown (no raw HTML), every `get_recipes_for_week` form (including the next changeable week, which is further ahead than the next box) and that the aliases agree with the delivery methods (compared as sets of recipe IDs: a pure reordering is a WARN, a differing recipe is a FAIL). If the Auth0 refresh falls back to a full login, it repeats the refresh once and prints Auth0's HTTP status and `error`/`error_description`, plus the refresh token's shape (empty/opaque/JWT-like, length, expiry; never the value). It compares recipe/step keys against `KNOWN_RECIPE_KEYS`/`KNOWN_STEP_KEYS` and warns on drift; update those sets when HelloFresh adds fields. It never writes anything (no selections, skips or subscription changes). Exit code: 0 if no FAIL (WARN allowed), 1 on any FAIL, 2 for missing credentials.
 
 ## Publishing
 
@@ -84,6 +97,8 @@ All API calls include `country=GB&locale=en-GB` except `/gw/my-deliveries/menu` 
 ### Week strings
 
 ISO week format: `"YYYY-WWW"` e.g. `"2026-W15"`. Built with `f"{iso.year}-W{iso.week:02d}"`.
+
+HelloFresh's week ids are *cooking* weeks, not delivery weeks. Verified live: the box with `deliveryDate` Sunday 8 Nov 2026 has id `2026-W46`, but 8 Nov is in ISO week 45. So `get_recipes_for_week(date)` maps a date to the box whose id equals that date's ISO week: pass a date in the cooking week, not the delivery date. Meal order within a box is also not stable between API calls, so compare boxes as sets of recipe IDs.
 
 ## Dependencies
 
